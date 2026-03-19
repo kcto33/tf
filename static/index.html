@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>文件传输</title>
-    <link rel="stylesheet" href="/static/styles.css?v=3" />
+    <link rel="stylesheet" href="/static/styles.css?v=10" />
   </head>
   <body>
     <main class="page">
@@ -135,15 +135,18 @@
     </template>
 
     <template id="peerCardTemplate">
-      <button class="peer-card" type="button">
-        <div class="peer-card-main">
-          <strong class="peer-name"></strong>
-          <p class="peer-meta"></p>
-        </div>
-        <span class="peer-badge badge muted"></span>
-      </button>
+      <div class="peer-card">
+        <button class="peer-card-button" type="button">
+          <div class="peer-card-copy">
+            <strong class="peer-name"></strong>
+            <p class="peer-meta"></p>
+          </div>
+          <span class="peer-badge badge muted"></span>
+        </button>
+        <button class="peer-send-toggle ghost small" type="button">加入发送</button>
+      </div>
     </template>
 
-    <script type="module" src="/static/desktop.js?v=3"></script>
+    <script type="module" src="/static/desktop.js?v=10"></script>
   </body>
 </html>

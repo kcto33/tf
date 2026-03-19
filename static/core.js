@@ -9,6 +9,7 @@ const RELAY_MAX_TRANSFER_BYTES = 64 * 1024 * 1024
 const IOS_SAFARI_MAX_INCOMING_BYTES = 1536 * 1024 * 1024
 const SESSION_PROGRESS_BATCH_SIZE = 32
 const MOBILE_SKIP_CHECKSUM_BYTES = 128 * 1024 * 1024
+const SESSION_RECEIVE_ACK_TIMEOUT_MS = 20000
 const DEFAULT_ICE_SERVERS = [
   { urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] },
 ]
@@ -130,6 +131,7 @@ class TransferApp {
     this.runtime = detectRuntimeCapabilities()
     this.transferMetrics = null
     this.incomingChunkState = new Map()
+    this.disconnectPromise = null
     this.state = {
       ws: null,
       db: null,
@@ -141,6 +143,7 @@ class TransferApp {
       peers: new Map(),
       connections: new Map(),
       selectedPeerId: null,
+      selectedTransferPeerIds: new Set(),
       selectedFiles: [],
       pendingIncomingRequests: new Map(),
       outgoingSessions: new Map(),
@@ -195,6 +198,20 @@ class TransferApp {
 
   getSelectedPeer() {
     return this.state.selectedPeerId ? this.state.peers.get(this.state.selectedPeerId) || null : null
+  }
+
+  getSelectedTransferPeerIds() {
+    return Array.from(this.state.selectedTransferPeerIds.values()).filter((peerId) => this.state.peers.has(peerId))
+  }
+
+  getSelectedTransferPeers() {
+    return this.getSelectedTransferPeerIds()
+      .map((peerId) => this.state.peers.get(peerId) || null)
+      .filter(Boolean)
+  }
+
+  isTransferPeerSelected(peerId) {
+    return this.state.selectedTransferPeerIds.has(peerId) && this.state.peers.has(peerId)
   }
 
   getPeerName(peerId) {
@@ -279,6 +296,15 @@ class TransferApp {
     const files = Array.from(items || [])
     this.state.selectedFiles = this.options.allowMultipleFiles ? files : files.slice(0, 1)
     this.notify()
+  }
+
+  removeSelectedFile(index) {
+    if (!Number.isInteger(index) || index < 0 || index >= this.state.selectedFiles.length) {
+      return false
+    }
+    this.state.selectedFiles = this.state.selectedFiles.filter((_, itemIndex) => itemIndex !== index)
+    this.notify()
+    return true
   }
 
   clearSelectedFiles() {
@@ -383,6 +409,7 @@ class TransferApp {
   ensureIncomingChunkState(session) {
     let chunkState = this.incomingChunkState.get(session.sessionId)
     if (!chunkState) {
+      const initialProgress = calculateIncomingProgress(session.filesMeta || [], objectToSets(session.completedChunks))
       chunkState = {
         sessionId: session.sessionId,
         peerClientId: session.peerClientId || "",
@@ -391,6 +418,9 @@ class TransferApp {
         completedSets: objectToSets(session.completedChunks),
         dirtyCount: 0,
         createdAt: session.createdAt || Date.now(),
+        lastReportedBytes: initialProgress.done,
+        pendingProgressCount: 0,
+        lastProgressSentAt: 0,
       }
       this.incomingChunkState.set(session.sessionId, chunkState)
     }
@@ -417,6 +447,169 @@ class TransferApp {
     this.incomingChunkState.delete(sessionId)
   }
 
+  ensureReceiverAckPromise(session) {
+    if (!session) {
+      return Promise.resolve({ acknowledged: false, missing: true })
+    }
+    if (!session.receiverAckPromise) {
+      session.receiverAckPromise = new Promise((resolve) => {
+        session.resolveReceiverAck = resolve
+      })
+    }
+    return session.receiverAckPromise
+  }
+
+  settleReceiverAck(session, result) {
+    if (!session || !session.resolveReceiverAck) {
+      return
+    }
+    session.resolveReceiverAck(result)
+    session.resolveReceiverAck = null
+  }
+
+  async waitForReceiverCompletion(session) {
+    if (!session) {
+      return { acknowledged: false, missing: true }
+    }
+    if (session.receiverAckWaitPromise) {
+      return session.receiverAckWaitPromise
+    }
+
+    session.awaitingReceiverAck = true
+    const ackPromise = this.ensureReceiverAckPromise(session)
+    session.receiverAckWaitPromise = (async () => {
+      const result = await Promise.race([
+        ackPromise,
+        delay(SESSION_RECEIVE_ACK_TIMEOUT_MS).then(() => ({ acknowledged: false, timeout: true })),
+      ])
+      if (result && result.timeout) {
+        this.settleReceiverAck(session, result)
+      }
+      return result
+    })()
+
+    try {
+      return await session.receiverAckWaitPromise
+    } finally {
+      session.awaitingReceiverAck = false
+      session.receiverAckWaitPromise = null
+      session.receiverAckPromise = null
+      session.resolveReceiverAck = null
+    }
+  }
+
+  async waitForPendingReceiverAcks() {
+    const sessions = Array.from(this.state.outgoingSessions.values()).filter(
+      (session) => session.awaitingReceiverAck || session.receiverAckWaitPromise
+    )
+    if (!sessions.length) {
+      return
+    }
+    this.appendLog("Closing is delayed until the receiver finishes the final save step.", "info")
+    await Promise.allSettled(sessions.map((session) => this.waitForReceiverCompletion(session)))
+  }
+
+  updateOutgoingTransferStatus(session) {
+    if (!session) {
+      return
+    }
+    const total = session.totalSize || 0
+    const remoteReceivedBytes = Math.min(session.remoteReceivedBytes || 0, total)
+    if (session.awaitingReceiverAck && remoteReceivedBytes >= total) {
+      this.setTransferStatus(`Waiting for ${session.peerName} to finish receiving`, total, total)
+      return
+    }
+    this.setTransferStatus(
+      `${session.transport === "relay" ? "中继发送到" : "发送到"} ${session.peerName} · 对端已接收`,
+      remoteReceivedBytes,
+      total
+    )
+  }
+
+  async sendIncomingProgress(chunkState, done, total, force = false) {
+    if (!chunkState || !chunkState.peerClientId) {
+      return false
+    }
+    const now = Date.now()
+    chunkState.pendingProgressCount = (chunkState.pendingProgressCount || 0) + 1
+    const isFirstReport = !chunkState.lastProgressSentAt
+    const shouldReport =
+      force ||
+      isFirstReport ||
+      chunkState.pendingProgressCount >= SESSION_PROGRESS_BATCH_SIZE ||
+      now - chunkState.lastProgressSentAt >= 200
+
+    if (!shouldReport) {
+      return false
+    }
+
+    const payload = {
+      type: "session_progress",
+      session_id: chunkState.sessionId,
+      received_bytes: done,
+      total_size: total,
+    }
+    const transport = this.getOpenConnection(chunkState.peerClientId) ? "p2p" : "relay"
+
+    try {
+      if (transport === "p2p") {
+        const connection = this.getOpenConnection(chunkState.peerClientId)
+        if (!connection) {
+          return false
+        }
+        await this.sendTransferControl(chunkState.peerClientId, "p2p", connection, payload)
+      } else {
+        if (!this.isConnected()) {
+          return false
+        }
+        await this.sendTransferControl(chunkState.peerClientId, "relay", null, payload)
+      }
+      chunkState.lastReportedBytes = done
+      chunkState.pendingProgressCount = 0
+      chunkState.lastProgressSentAt = now
+      return true
+    } catch (error) {
+      void error
+      return false
+    }
+  }
+
+  async sendIncomingSessionAck(sessionId) {
+    const session = await this.getSessionRecord(sessionId)
+    if (!session || !session.peerClientId) {
+      return false
+    }
+
+    const payload = {
+      type: "session_received",
+      session_id: sessionId,
+    }
+    const preferredTransport = session.transport || (this.getOpenConnection(session.peerClientId) ? "p2p" : "relay")
+    const transports = preferredTransport === "p2p" ? ["p2p", "relay"] : ["relay", "p2p"]
+
+    for (const transport of transports) {
+      try {
+        if (transport === "p2p") {
+          const connection = this.getOpenConnection(session.peerClientId)
+          if (!connection) {
+            continue
+          }
+          await this.sendTransferControl(session.peerClientId, "p2p", connection, payload)
+          return true
+        }
+        if (!this.isConnected()) {
+          continue
+        }
+        await this.sendTransferControl(session.peerClientId, "relay", null, payload)
+        return true
+      } catch (error) {
+        void error
+      }
+    }
+
+    return false
+  }
+
   assertSessionNotCancelled(session) {
     if (session && session.cancelRequested) {
       throw new TransferCancelledError(session.cancelReason || "The transfer was cancelled.")
@@ -429,6 +622,11 @@ class TransferApp {
     }
     session.cancelRequested = true
     session.cancelReason = reason
+    this.settleReceiverAck(session, {
+      acknowledged: false,
+      cancelled: true,
+      reason,
+    })
     await this.updateSessionRecord(session.sessionId, {
       status: "cancelled",
       updatedAt: Date.now(),
@@ -454,7 +652,7 @@ class TransferApp {
         return
       }
 
-      this.disconnectFromRoom()
+      await this.disconnectFromRoom()
       this.state.roomCode = roomCode
       this.state.displayName = displayName
       this.state.formRoomCode = roomCode
@@ -508,13 +706,26 @@ class TransferApp {
     }
   }
 
-  disconnectFromRoom() {
-    if (this.state.ws) {
-      const socket = this.state.ws
-      this.state.ws = null
-      socket.close()
+  async disconnectFromRoom() {
+    if (this.disconnectPromise) {
+      return this.disconnectPromise
     }
-    this.resetRoomState()
+
+    this.disconnectPromise = (async () => {
+      await this.waitForPendingReceiverAcks()
+      if (this.state.ws) {
+        const socket = this.state.ws
+        this.state.ws = null
+        socket.close()
+      }
+      this.resetRoomState()
+    })()
+
+    try {
+      await this.disconnectPromise
+    } finally {
+      this.disconnectPromise = null
+    }
   }
 
   resetRoomState() {
@@ -527,6 +738,7 @@ class TransferApp {
     this.state.chatMessages.clear()
     this.state.unreadMessages.clear()
     this.state.selectedPeerId = null
+    this.state.selectedTransferPeerIds.clear()
     this.state.clientId = ""
     this.clearTransferStatus()
     this.notify()
@@ -610,6 +822,7 @@ class TransferApp {
 
   removePeer(peerId) {
     this.state.peers.delete(peerId)
+    this.state.selectedTransferPeerIds.delete(peerId)
     this.closePeerConnection(peerId)
     for (const request of this.state.pendingIncomingRequests.values()) {
       if (request.fromClientId === peerId) {
@@ -624,10 +837,16 @@ class TransferApp {
 
   pickFallbackPeer() {
     if (this.state.selectedPeerId && this.state.peers.has(this.state.selectedPeerId)) {
+      if (!this.state.selectedTransferPeerIds.size && this.state.peers.size === 1) {
+        this.state.selectedTransferPeerIds.add(this.state.selectedPeerId)
+      }
       return
     }
     const nextPeerCandidate = this.state.peers.keys().next().value
     this.state.selectedPeerId = nextPeerCandidate === undefined ? null : nextPeerCandidate
+    if (!this.state.selectedTransferPeerIds.size && this.state.peers.size === 1 && this.state.selectedPeerId) {
+      this.state.selectedTransferPeerIds.add(this.state.selectedPeerId)
+    }
   }
 
   selectPeer(peerId) {
@@ -635,7 +854,26 @@ class TransferApp {
       return
     }
     this.state.selectedPeerId = peerId
+    if (!this.state.selectedTransferPeerIds.size) {
+      this.state.selectedTransferPeerIds.add(peerId)
+    }
     this.state.unreadMessages.set(peerId, 0)
+    this.notify()
+  }
+
+  toggleTransferPeer(peerId, force = null) {
+    if (!this.state.peers.has(peerId)) {
+      return
+    }
+    const shouldSelect = force === null ? !this.state.selectedTransferPeerIds.has(peerId) : Boolean(force)
+    if (shouldSelect) {
+      this.state.selectedTransferPeerIds.add(peerId)
+      if (!this.state.selectedPeerId) {
+        this.state.selectedPeerId = peerId
+      }
+    } else {
+      this.state.selectedTransferPeerIds.delete(peerId)
+    }
     this.notify()
   }
 
@@ -909,9 +1147,9 @@ class TransferApp {
 
   async startTransferRequest() {
     try {
-      const peerId = this.state.selectedPeerId
-      if (!peerId) {
-        this.appendLog("先在房间设备列表里选择一个发送对象。", "warn")
+      const selectedPeerIds = this.getSelectedTransferPeerIds()
+      if (!selectedPeerIds.length) {
+        this.appendLog("先在房间设备列表里选择至少一个发送对象。", "warn")
         return false
       }
       if (!this.state.selectedFiles.length) {
@@ -922,26 +1160,15 @@ class TransferApp {
         this.appendLog("当前界面只支持发送单个文件。", "warn")
         return false
       }
-      const connection = this.getOpenConnection(peerId)
-      const transportPreference = connection ? "p2p" : "relay"
-      if (!connection && this.state.selectedFiles.length > 1) {
-        this.appendLog("当前连接不可用时，仅支持通过中继发送单个文件。", "warn")
-        return false
-      }
-      if (!connection) {
-        this.appendLog(`将通过中继向 ${this.getPeerName(peerId)} 发送文件。`, "info")
-      }
 
       this.setTransferStatus("准备中", 0, 0)
 
-      const files = []
+      const fileBlueprints = []
       let totalSize = 0
       for (const item of this.state.selectedFiles) {
-        const fileId = makeId()
         const sha256 = await hashFile(item.file)
         const chunkCount = Math.max(Math.ceil(item.file.size / CHUNK_SIZE), 1)
-        files.push({
-          file_id: fileId,
+        fileBlueprints.push({
           relative_path: item.relativePath,
           size: item.file.size,
           sha256,
@@ -951,58 +1178,90 @@ class TransferApp {
         })
         totalSize += item.file.size
       }
-      if (transportPreference === "relay" && this.shouldAvoidRelayForSize(totalSize)) {
-        this.appendLog(
-          `Relay mode is limited to ${formatBytes(RELAY_MAX_TRANSFER_BYTES)}. Wait for direct connection before sending ${formatBytes(totalSize)}.`,
-          "warn"
-        )
+      let createdCount = 0
+      for (const peerId of selectedPeerIds) {
+        const connection = this.getOpenConnection(peerId)
+        const transportPreference = connection ? "p2p" : "relay"
+        const peerName = this.getPeerName(peerId)
+
+        if (!connection && this.state.selectedFiles.length > 1) {
+          this.appendLog(`${peerName} 当前未建立直连，多文件发送已跳过。`, "warn")
+          continue
+        }
+        if (transportPreference === "relay" && this.shouldAvoidRelayForSize(totalSize)) {
+          this.appendLog(
+            `${peerName} 当前只能通过中继接收，${formatBytes(totalSize)} 超过 ${formatBytes(RELAY_MAX_TRANSFER_BYTES)} 限制，已跳过。`,
+            "warn"
+          )
+          continue
+        }
+        if (!connection) {
+          this.appendLog(`将通过中继向 ${peerName} 发送文件。`, "info")
+        }
+
+        const sessionId = makeId()
+        const createdAt = Date.now()
+        const files = fileBlueprints.map((fileMeta) => ({
+          ...fileMeta,
+          file_id: makeId(),
+        }))
+        const session = {
+          sessionId,
+          peerClientId: peerId,
+          peerName,
+          files,
+          totalSize,
+          sentBytes: 0,
+          sending: false,
+          accepted: false,
+          transport: transportPreference,
+          createdAt,
+          cancelRequested: false,
+          cancelReason: "",
+          remoteReceivedBytes: 0,
+          awaitingReceiverAck: false,
+          receiverAckPromise: null,
+          receiverAckWaitPromise: null,
+          resolveReceiverAck: null,
+        }
+        this.state.outgoingSessions.set(sessionId, session)
+
+        await this.upsertSessionRecord({
+          sessionId,
+          direction: "outgoing",
+          status: "waiting",
+          roomCode: this.state.roomCode,
+          peerClientId: peerId,
+          peerName: session.peerName,
+          createdAt,
+          updatedAt: Date.now(),
+          completedAt: null,
+          fileCount: files.length,
+          totalSize,
+          filesMeta: files.map(stripFileHandle),
+          completedChunks: {},
+        })
+
+        this.sendSignal({
+          type: "transfer_request",
+          target_client_id: peerId,
+          session_id: sessionId,
+          total_size: totalSize,
+          files: files.map(stripFileHandle),
+          transport_preference: transportPreference,
+        })
+        createdCount += 1
+      }
+
+      if (!createdCount) {
+        this.appendLog("当前所选设备都不满足发送条件，请等待直连或调整文件选择。", "warn")
         return false
       }
 
-      const sessionId = makeId()
-      const createdAt = Date.now()
-      const session = {
-        sessionId,
-        peerClientId: peerId,
-        peerName: this.getPeerName(peerId),
-        files,
-        totalSize,
-        sentBytes: 0,
-        sending: false,
-        accepted: false,
-        transport: transportPreference,
-        createdAt,
-        cancelRequested: false,
-        cancelReason: "",
-      }
-      this.state.outgoingSessions.set(sessionId, session)
-
-      await this.upsertSessionRecord({
-        sessionId,
-        direction: "outgoing",
-        status: "waiting",
-        roomCode: this.state.roomCode,
-        peerClientId: peerId,
-        peerName: session.peerName,
-        createdAt,
-        updatedAt: Date.now(),
-        completedAt: null,
-        fileCount: files.length,
-        totalSize,
-        filesMeta: files.map(stripFileHandle),
-        completedChunks: {},
-      })
-
-      this.sendSignal({
-        type: "transfer_request",
-        target_client_id: peerId,
-        session_id: sessionId,
-        total_size: totalSize,
-        files: files.map(stripFileHandle),
-        transport_preference: transportPreference,
-      })
-
-      this.appendLog(`已向 ${session.peerName} 发起传输请求。`, "info")
+      this.appendLog(
+        createdCount === 1 ? "已向 1 台设备发起传输请求。" : `已向 ${createdCount} 台设备发起传输请求。`,
+        "info"
+      )
       await this.refreshHistory()
       return true
     } catch (error) {
@@ -1116,6 +1375,7 @@ class TransferApp {
         totalSize: request.totalSize,
         filesMeta: request.files,
         completedChunks: {},
+        transport,
       }
     } else {
       session = {
@@ -1127,6 +1387,7 @@ class TransferApp {
         filesMeta: request.files,
         fileCount: request.files.length,
         totalSize: request.totalSize,
+        transport,
       }
     }
 
@@ -1199,6 +1460,11 @@ class TransferApp {
     if (session.accepted || session.sending) {
       session.cancelRequested = true
       session.cancelReason = reason
+      this.settleReceiverAck(session, {
+        acknowledged: false,
+        cancelled: true,
+        reason,
+      })
       if (this.isConnected()) {
         this.sendSignal({
           type: "transfer_abort",
@@ -1370,6 +1636,11 @@ class TransferApp {
     if (outgoingSession) {
       outgoingSession.cancelRequested = true
       outgoingSession.cancelReason = reason
+      this.settleReceiverAck(outgoingSession, {
+        acknowledged: false,
+        cancelled: true,
+        reason,
+      })
       this.appendLog(reason, "warn")
       if (!outgoingSession.sending) {
         await this.finalizeOutgoingCancellation(outgoingSession, reason)
@@ -1423,6 +1694,10 @@ class TransferApp {
 
     session.sending = true
     session.sentBytes = 0
+    session.remoteReceivedBytes = calculateIncomingProgress(
+      session.files,
+      Object.fromEntries(Array.from(completedMap.entries()).map(([fileId, set]) => [fileId, set]))
+    ).done
     if (connection) {
       connection.sendingSessionId = session.sessionId
     }
@@ -1436,7 +1711,7 @@ class TransferApp {
         status: "sending",
         updatedAt: Date.now(),
       })
-      this.setTransferStatus(`${transport === "relay" ? "中继发送到" : "发送到"} ${session.peerName}`, session.sentBytes, session.totalSize)
+      this.updateOutgoingTransferStatus(session)
 
       await this.sendTransferControl(session.peerClientId, transport, connection, {
         type: "session_start",
@@ -1463,7 +1738,7 @@ class TransferApp {
           const chunkSize = Math.min(CHUNK_SIZE, Math.max(fileMeta.size - chunkIndex * CHUNK_SIZE, 0))
           if (completedChunks.has(chunkIndex)) {
             session.sentBytes += chunkSize
-            this.setTransferStatus(`发送到 ${session.peerName}`, session.sentBytes, session.totalSize)
+            this.updateOutgoingTransferStatus(session)
             continue
           }
 
@@ -1495,7 +1770,7 @@ class TransferApp {
             })
           }
           session.sentBytes += buffer.byteLength
-          this.setTransferStatus(`${transport === "relay" ? "中继发送到" : "发送到"} ${session.peerName}`, session.sentBytes, session.totalSize)
+          this.updateOutgoingTransferStatus(session)
         }
 
         await this.sendTransferControl(session.peerClientId, transport, connection, {
@@ -1510,6 +1785,17 @@ class TransferApp {
         type: "session_complete",
         session_id: session.sessionId,
       })
+      this.appendLog(`Data send finished. Waiting for ${session.peerName} to confirm receipt.`, "info")
+      this.setTransferStatus(`Waiting for ${session.peerName} to finish receiving`, session.totalSize, session.totalSize)
+      const receipt = await this.waitForReceiverCompletion(session)
+      if (receipt && receipt.acknowledged) {
+        this.appendLog(`${session.peerName} confirmed that the receive side has finished saving.`, "info")
+      } else {
+        this.appendLog(
+          `No receive confirmation arrived within ${Math.round(SESSION_RECEIVE_ACK_TIMEOUT_MS / 1000)} seconds. The channel can now close safely.`,
+          "warn"
+        )
+      }
 
       this.appendLog(`发送完成: ${session.peerName}。`, "info")
       await this.updateSessionRecord(session.sessionId, {
@@ -1574,8 +1860,14 @@ class TransferApp {
         case "file_end":
           await this.finalizeIncomingFile(message)
           break
+        case "session_progress":
+          this.onSessionProgress(message)
+          break
         case "session_complete":
           await this.finalizeIncomingSession(message.session_id)
+          break
+        case "session_received":
+          this.onSessionReceived(message)
           break
         default:
           this.appendLog(`忽略未知数据通道消息 ${message.type}。`, "warn")
@@ -1654,11 +1946,41 @@ class TransferApp {
       case "file_end":
         await this.finalizeIncomingFile(message)
         break
+      case "session_progress":
+        this.onSessionProgress(message)
+        break
       case "session_complete":
         await this.finalizeIncomingSession(message.session_id)
         break
+      case "session_received":
+        this.onSessionReceived(message)
+        break
       default:
         this.appendLog(`忽略未知控制消息 ${message.type}。`, "warn")
+    }
+  }
+
+  onSessionReceived(message) {
+    const session = this.state.outgoingSessions.get(message.session_id)
+    if (!session) {
+      return
+    }
+    session.remoteReceivedBytes = session.totalSize || session.remoteReceivedBytes || 0
+    this.settleReceiverAck(session, {
+      acknowledged: true,
+      sessionId: message.session_id,
+    })
+  }
+
+  onSessionProgress(message) {
+    const session = this.state.outgoingSessions.get(message.session_id)
+    if (!session) {
+      return
+    }
+    const receivedBytes = Math.max(0, Number(message.received_bytes) || 0)
+    session.remoteReceivedBytes = Math.max(session.remoteReceivedBytes || 0, receivedBytes)
+    if (session.sending || session.awaitingReceiverAck) {
+      this.updateOutgoingTransferStatus(session)
     }
   }
 
@@ -1709,6 +2031,7 @@ class TransferApp {
 
     const progress = calculateIncomingProgress(chunkState.filesMeta, completed)
     this.setTransferStatus(`Receiving from ${chunkState.peerName || session.peerName}`, progress.done, progress.total)
+    await this.sendIncomingProgress(chunkState, progress.done, progress.total)
     return
   }
 
@@ -1781,9 +2104,16 @@ class TransferApp {
       status: "completed",
       completedAt: Date.now(),
     })
+    await this.sendIncomingProgress(
+      this.ensureIncomingChunkState(session),
+      session.totalSize || 0,
+      session.totalSize || 0,
+      true
+    )
     await this.clearChunksBySession(sessionId)
     this.clearIncomingChunkState(sessionId)
     this.appendLog(`接收完成，已保存来自 ${session.peerName} 的文件。`, "info")
+    await this.sendIncomingSessionAck(sessionId)
     this.clearTransferStatus()
     await this.refreshHistory()
   }
