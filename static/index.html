@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>文件传输</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=3" />
   </head>
   <body>
     <main class="page">
@@ -110,7 +110,10 @@
         <article class="panel">
           <div class="section-head">
             <h2>当前传输</h2>
-            <span id="transferBadge" class="badge muted">空闲</span>
+            <div class="button-row compact">
+              <button id="transferActionBtn" type="button" class="ghost small" hidden>停止传输</button>
+              <span id="transferBadge" class="badge muted">空闲</span>
+            </div>
           </div>
           <p class="selected-peer-line">当前通道：<strong id="channelState">-</strong></p>
           <div id="transferLog" class="log"></div>
@@ -141,6 +144,6 @@
       </button>
     </template>
 
-    <script type="module" src="/static/desktop.js"></script>
+    <script type="module" src="/static/desktop.js?v=3"></script>
   </body>
 </html>

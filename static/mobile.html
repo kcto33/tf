@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>文件传输 - 手机版</title>
-    <link rel="stylesheet" href="/static/mobile.css" />
+    <link rel="stylesheet" href="/static/mobile.css?v=3" />
   </head>
   <body>
     <main class="mobile-page">
@@ -75,7 +75,10 @@
       <section class="mobile-card">
         <div class="section-head">
           <h2>状态</h2>
-          <span id="transferBadge" class="badge muted">空闲</span>
+          <div class="button-row compact">
+            <button id="transferActionBtn" type="button" class="ghost small" hidden>停止传输</button>
+            <span id="transferBadge" class="badge muted">空闲</span>
+          </div>
         </div>
         <div id="statusList" class="status-list empty">进入房间后，这里会显示传输和连接状态。</div>
       </section>
@@ -104,6 +107,6 @@
       </div>
     </template>
 
-    <script type="module" src="/static/mobile.js"></script>
+    <script type="module" src="/static/mobile.js?v=3"></script>
   </body>
 </html>

@@ -202,6 +202,8 @@ async def signaling_socket(websocket: WebSocket) -> None:
                 "transfer_request",
                 "transfer_accept",
                 "transfer_reject",
+                "transfer_cancel",
+                "transfer_abort",
                 "resume_request",
                 "resume_state",
                 "relay_payload",

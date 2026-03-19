@@ -6,6 +6,7 @@ import {
   formatBytes,
   formatChatTime,
   formatFileSummary,
+  formatTransferSpeed,
 } from "./core.js"
 
 const app = createTransferApp({
@@ -28,6 +29,7 @@ const els = {
   selectedPeerName: document.querySelector("#selectedPeerName"),
   sendHint: document.querySelector("#sendHint"),
   chatHint: document.querySelector("#chatHint"),
+  transferActionBtn: document.querySelector("#transferActionBtn"),
   transferBadge: document.querySelector("#transferBadge"),
   selectionList: document.querySelector("#selectionList"),
   peerList: document.querySelector("#peerList"),
@@ -73,6 +75,7 @@ function bindEvents() {
     app.setSelectedFiles(collectInputFiles(event.target.files, { allowMultipleFiles: false }))
   })
   els.sendBtn.addEventListener("click", () => app.startTransferRequest())
+  els.transferActionBtn.addEventListener("click", () => app.performTransferAction())
   els.chatSendBtn.addEventListener("click", sendChatMessage)
   els.chatInput.addEventListener("input", renderAll)
   els.chatInput.addEventListener("keydown", async (event) => {
@@ -116,6 +119,7 @@ function renderAll() {
   els.disconnectBtn.disabled = !wsReady
   els.sendBtn.disabled = !(canRelay && state.selectedFiles.length)
   els.chatSendBtn.disabled = !(canRelay && els.chatInput.value.trim())
+  renderTransferAction()
 
   renderPeerList()
   renderPendingTransfers()
@@ -123,6 +127,13 @@ function renderAll() {
   renderChatMessages()
   renderStatusList()
   updateSwitchLink()
+}
+
+function renderTransferAction() {
+  const action = app.getTransferAction()
+  els.transferActionBtn.hidden = !action
+  els.transferActionBtn.disabled = !action
+  els.transferActionBtn.textContent = action ? action.label : "停止传输"
 }
 
 function renderPeerList() {
@@ -228,9 +239,10 @@ function renderStatusList() {
     statusNode.innerHTML = `
       <strong>${escapeHtml(transferStatus.label)} ${transferStatus.percent}%</strong>
       <p>${formatBytes(transferStatus.done)} / ${formatBytes(transferStatus.total)}</p>
+      <p>速度 ${formatTransferSpeed(transferStatus.speed)}</p>
     `
     els.statusList.append(statusNode)
-    els.transferBadge.textContent = `${transferStatus.percent}%`
+    els.transferBadge.textContent = `速度 ${formatTransferSpeed(transferStatus.speed)}`
     els.transferBadge.className = "badge"
   } else {
     els.transferBadge.textContent = "空闲"

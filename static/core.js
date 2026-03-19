@@ -5,6 +5,10 @@ const SESSION_STORE = "sessions"
 const CHUNK_STORE = "chunks"
 const MAX_BUFFERED_AMOUNT = 4 * 1024 * 1024
 const MAX_LOGS = 80
+const RELAY_MAX_TRANSFER_BYTES = 64 * 1024 * 1024
+const IOS_SAFARI_MAX_INCOMING_BYTES = 1536 * 1024 * 1024
+const SESSION_PROGRESS_BATCH_SIZE = 32
+const MOBILE_SKIP_CHECKSUM_BYTES = 128 * 1024 * 1024
 const DEFAULT_ICE_SERVERS = [
   { urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] },
 ]
@@ -72,6 +76,13 @@ export function formatBytes(bytes) {
   return `${value.toFixed(value >= 10 || index === 0 ? 0 : 1)} ${units[index]}`
 }
 
+export function formatTransferSpeed(bytesPerSecond) {
+  if (!bytesPerSecond || bytesPerSecond <= 0) {
+    return "0 B/s"
+  }
+  return `${formatBytes(bytesPerSecond)}/s`
+}
+
 export function formatChatTime(timestamp) {
   return new Date(timestamp || Date.now()).toLocaleString()
 }
@@ -85,6 +96,9 @@ export function formatFileSummary(filesMeta = [], limit = 3) {
 export function historyBadgeClass(status) {
   if (status === "completed") {
     return ""
+  }
+  if (status === "cancelled") {
+    return "warn"
   }
   if (status === "failed" || status === "rejected") {
     return "danger"
@@ -113,6 +127,9 @@ class TransferApp {
       ...options,
     }
     this.listeners = new Set()
+    this.runtime = detectRuntimeCapabilities()
+    this.transferMetrics = null
+    this.incomingChunkState = new Map()
     this.state = {
       ws: null,
       db: null,
@@ -154,6 +171,9 @@ class TransferApp {
       await this.refreshHistory()
     } catch (error) {
       this.appendLog(`本地存储初始化失败: ${error.message}`, "warn")
+    }
+    if (this.runtime.isIOSWebKitBrowser) {
+      this.appendLog("Large-file receive on iPhone browsers is limited. Safer limits are enabled.", "warn")
     }
     this.notify()
   }
@@ -202,6 +222,55 @@ class TransferApp {
     return this.state.unreadMessages.get(peerId) || 0
   }
 
+  getCurrentOutgoingSession() {
+    const sessions = Array.from(this.state.outgoingSessions.values())
+    sessions.sort((left, right) => {
+      const leftPriority = left.sending ? 3 : left.accepted ? 2 : 1
+      const rightPriority = right.sending ? 3 : right.accepted ? 2 : 1
+      if (leftPriority !== rightPriority) {
+        return rightPriority - leftPriority
+      }
+      return (right.createdAt || 0) - (left.createdAt || 0)
+    })
+    return sessions[0] || null
+  }
+
+  getCurrentIncomingSession() {
+    const sessions = Array.from(this.incomingChunkState.values())
+    sessions.sort((left, right) => (right.createdAt || 0) - (left.createdAt || 0))
+    return sessions[0] || null
+  }
+
+  getTransferAction() {
+    const outgoing = this.getCurrentOutgoingSession()
+    if (outgoing && outgoing.sending) {
+      return {
+        type: "stop_outgoing",
+        label: "停止发送",
+        sessionId: outgoing.sessionId,
+      }
+    }
+
+    const incoming = this.getCurrentIncomingSession()
+    if (incoming) {
+      return {
+        type: "stop_incoming",
+        label: "停止接收",
+        sessionId: incoming.sessionId,
+      }
+    }
+
+    if (outgoing) {
+      return {
+        type: "cancel_outgoing",
+        label: "取消请求",
+        sessionId: outgoing.sessionId,
+      }
+    }
+
+    return null
+  }
+
   isConnected() {
     return Boolean(this.state.ws && this.state.ws.readyState === WebSocket.OPEN)
   }
@@ -233,18 +302,147 @@ class TransferApp {
 
   setTransferStatus(label, done = 0, total = 0) {
     const percent = total ? Math.round((done / total) * 100) : 0
+    const speed = this.measureTransferSpeed(label, done, total)
     this.state.transferStatus = {
       label,
       done,
       total,
       percent,
+      speed,
     }
     this.notify()
   }
 
   clearTransferStatus() {
+    this.transferMetrics = null
     this.state.transferStatus = null
     this.notify()
+  }
+
+  measureTransferSpeed(label, done, total) {
+    const now = Date.now()
+    const previous = this.transferMetrics
+    const isContinuous =
+      previous &&
+      previous.label === label &&
+      previous.total === total &&
+      done >= previous.done
+
+    if (!isContinuous) {
+      this.transferMetrics = {
+        label,
+        total,
+        startTime: now,
+        lastTime: now,
+        done,
+        smoothedBytesPerSecond: 0,
+      }
+      return 0
+    }
+
+    const deltaBytes = done - previous.done
+    const deltaMs = now - previous.lastTime
+    let smoothedBytesPerSecond = previous.smoothedBytesPerSecond
+    if (deltaBytes > 0 && deltaMs > 0) {
+      const instantBytesPerSecond = (deltaBytes * 1000) / deltaMs
+      smoothedBytesPerSecond = smoothedBytesPerSecond
+        ? smoothedBytesPerSecond * 0.7 + instantBytesPerSecond * 0.3
+        : instantBytesPerSecond
+    }
+
+    const elapsedMs = Math.max(now - previous.startTime, 1)
+    const averageBytesPerSecond = done > 0 ? (done * 1000) / elapsedMs : 0
+    const speed = smoothedBytesPerSecond || averageBytesPerSecond
+
+    this.transferMetrics = {
+      ...previous,
+      lastTime: now,
+      done,
+      smoothedBytesPerSecond,
+    }
+    return speed
+  }
+
+  shouldAvoidRelayForSize(totalSize) {
+    return totalSize > RELAY_MAX_TRANSFER_BYTES
+  }
+
+  shouldBlockIncomingTransfer(totalSize, transportPreference) {
+    if (!this.runtime.isIOSWebKitBrowser) {
+      return null
+    }
+    if (transportPreference === "relay" && totalSize > RELAY_MAX_TRANSFER_BYTES) {
+      return "iPhone browsers do not support relayed large transfers reliably. Wait for direct connection or use desktop mode."
+    }
+    if (totalSize > IOS_SAFARI_MAX_INCOMING_BYTES) {
+      return "This file is too large for reliable receive on iPhone browsers. Use desktop mode on the phone or another device."
+    }
+    return null
+  }
+
+  ensureIncomingChunkState(session) {
+    let chunkState = this.incomingChunkState.get(session.sessionId)
+    if (!chunkState) {
+      chunkState = {
+        sessionId: session.sessionId,
+        peerClientId: session.peerClientId || "",
+        filesMeta: Array.from(session.filesMeta || []),
+        peerName: session.peerName || "",
+        completedSets: objectToSets(session.completedChunks),
+        dirtyCount: 0,
+        createdAt: session.createdAt || Date.now(),
+      }
+      this.incomingChunkState.set(session.sessionId, chunkState)
+    }
+    return chunkState
+  }
+
+  async flushIncomingChunkState(sessionId, patch = {}) {
+    const chunkState = this.incomingChunkState.get(sessionId)
+    if (!chunkState) {
+      if (Object.keys(patch).length) {
+        await this.updateSessionRecord(sessionId, patch)
+      }
+      return
+    }
+    chunkState.dirtyCount = 0
+    await this.updateSessionRecord(sessionId, {
+      completedChunks: setsToObject(chunkState.completedSets),
+      updatedAt: Date.now(),
+      ...patch,
+    })
+  }
+
+  clearIncomingChunkState(sessionId) {
+    this.incomingChunkState.delete(sessionId)
+  }
+
+  assertSessionNotCancelled(session) {
+    if (session && session.cancelRequested) {
+      throw new TransferCancelledError(session.cancelReason || "The transfer was cancelled.")
+    }
+  }
+
+  async finalizeOutgoingCancellation(session, reason) {
+    if (!session) {
+      return
+    }
+    session.cancelRequested = true
+    session.cancelReason = reason
+    await this.updateSessionRecord(session.sessionId, {
+      status: "cancelled",
+      updatedAt: Date.now(),
+      completedAt: null,
+      errorMessage: reason,
+    })
+    this.state.outgoingSessions.delete(session.sessionId)
+    this.clearTransferStatus()
+    await this.refreshHistory()
+    this.notify()
+  }
+
+  shouldSkipChecksum(fileMeta) {
+    return Boolean(this.runtime.isMobileBrowser && fileMeta && fileMeta.size > MOBILE_SKIP_CHECKSUM_BYTES)
   }
 
   async connectToRoom(roomCodeInput, displayNameInput) {
@@ -321,6 +519,8 @@ class TransferApp {
 
   resetRoomState() {
     this.closeAllPeerConnections()
+    this.incomingChunkState.clear()
+    this.state.outgoingSessions.clear()
     this.state.peers.clear()
     this.state.connections.clear()
     this.state.pendingIncomingRequests.clear()
@@ -374,6 +574,12 @@ class TransferApp {
         break
       case "transfer_reject":
         await this.onTransferReject(message)
+        break
+      case "transfer_cancel":
+        await this.onTransferCancel(message)
+        break
+      case "transfer_abort":
+        await this.onTransferAbort(message)
         break
       case "relay_payload":
         await this.onRelayPayload(message)
@@ -745,8 +951,16 @@ class TransferApp {
         })
         totalSize += item.file.size
       }
+      if (transportPreference === "relay" && this.shouldAvoidRelayForSize(totalSize)) {
+        this.appendLog(
+          `Relay mode is limited to ${formatBytes(RELAY_MAX_TRANSFER_BYTES)}. Wait for direct connection before sending ${formatBytes(totalSize)}.`,
+          "warn"
+        )
+        return false
+      }
 
       const sessionId = makeId()
+      const createdAt = Date.now()
       const session = {
         sessionId,
         peerClientId: peerId,
@@ -757,6 +971,9 @@ class TransferApp {
         sending: false,
         accepted: false,
         transport: transportPreference,
+        createdAt,
+        cancelRequested: false,
+        cancelReason: "",
       }
       this.state.outgoingSessions.set(sessionId, session)
 
@@ -767,7 +984,7 @@ class TransferApp {
         roomCode: this.state.roomCode,
         peerClientId: peerId,
         peerName: session.peerName,
-        createdAt: Date.now(),
+        createdAt,
         updatedAt: Date.now(),
         completedAt: null,
         fileCount: files.length,
@@ -809,6 +1026,7 @@ class TransferApp {
         type: "transfer_reject",
         target_client_id: message.from_client_id,
         session_id: message.session_id,
+        reason: "This device only accepts a single top-level file in the current view.",
       })
       await this.upsertSessionRecord({
         sessionId: message.session_id,
@@ -831,6 +1049,36 @@ class TransferApp {
 
     const peerName = this.getPeerName(message.from_client_id)
     const existing = await this.getSessionRecord(message.session_id)
+    const blockReason = this.shouldBlockIncomingTransfer(
+      Number(message.total_size) || 0,
+      message.transport_preference || "p2p"
+    )
+    if (blockReason) {
+      this.appendLog(blockReason, "warn")
+      this.sendSignal({
+        type: "transfer_reject",
+        target_client_id: message.from_client_id,
+        session_id: message.session_id,
+        reason: blockReason,
+      })
+      await this.upsertSessionRecord({
+        sessionId: message.session_id,
+        direction: "incoming",
+        status: "rejected",
+        roomCode: this.state.roomCode,
+        peerClientId: message.from_client_id,
+        peerName,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        completedAt: null,
+        fileCount: incomingFiles.length,
+        totalSize: message.total_size,
+        filesMeta: incomingFiles,
+        completedChunks: {},
+      })
+      await this.refreshHistory()
+      return
+    }
     this.state.pendingIncomingRequests.set(message.session_id, {
       sessionId: message.session_id,
       fromClientId: message.from_client_id,
@@ -883,6 +1131,7 @@ class TransferApp {
     }
 
     await this.upsertSessionRecord(session)
+    this.ensureIncomingChunkState(session)
     this.sendSignal({
       type: "transfer_accept",
       target_client_id: request.fromClientId,
@@ -917,6 +1166,7 @@ class TransferApp {
       type: "transfer_reject",
       target_client_id: request.fromClientId,
       session_id: sessionId,
+      reason: "The receiver rejected the transfer.",
     })
     await this.upsertSessionRecord({
       sessionId,
@@ -935,8 +1185,121 @@ class TransferApp {
     })
 
     this.state.pendingIncomingRequests.delete(sessionId)
+    this.clearIncomingChunkState(sessionId)
     await this.refreshHistory()
     this.notify()
+  }
+
+  async cancelOutgoingSession(sessionId, reason = "The sender cancelled the transfer.") {
+    const session = this.state.outgoingSessions.get(sessionId)
+    if (!session) {
+      return false
+    }
+
+    if (session.accepted || session.sending) {
+      session.cancelRequested = true
+      session.cancelReason = reason
+      if (this.isConnected()) {
+        this.sendSignal({
+          type: "transfer_abort",
+          target_client_id: session.peerClientId,
+          session_id: sessionId,
+          reason,
+        })
+      }
+      this.appendLog(
+        session.sending ? `Stopping transfer to ${session.peerName}.` : `Cancelled transfer to ${session.peerName}.`,
+        "warn"
+      )
+      if (!session.sending) {
+        await this.finalizeOutgoingCancellation(session, reason)
+      }
+      this.notify()
+      return true
+    }
+
+    if (this.isConnected()) {
+      this.sendSignal({
+        type: "transfer_cancel",
+        target_client_id: session.peerClientId,
+        session_id: sessionId,
+        reason,
+      })
+    }
+    await this.finalizeOutgoingCancellation(session, reason)
+    return true
+  }
+
+  async cancelIncomingSession(sessionId, reason = "The receiver cancelled the transfer.", notifyPeer = false) {
+    const request = this.state.pendingIncomingRequests.get(sessionId) || null
+    const chunkState = this.incomingChunkState.get(sessionId) || null
+    const session = await this.getSessionRecord(sessionId)
+    if (session && ["completed", "rejected", "cancelled"].includes(session.status)) {
+      return false
+    }
+    const peerClientId = request?.fromClientId || chunkState?.peerClientId || session?.peerClientId || null
+    const peerName = request?.peerName || chunkState?.peerName || session?.peerName || ""
+
+    if (notifyPeer && peerClientId && this.isConnected()) {
+      this.sendSignal({
+        type: "transfer_abort",
+        target_client_id: peerClientId,
+        session_id: sessionId,
+        reason,
+      })
+    }
+
+    this.state.pendingIncomingRequests.delete(sessionId)
+    await this.clearChunksBySession(sessionId)
+    this.clearIncomingChunkState(sessionId)
+
+    if (session) {
+      await this.updateSessionRecord(sessionId, {
+        status: "cancelled",
+        updatedAt: Date.now(),
+        completedAt: null,
+        errorMessage: reason,
+      })
+    } else if (request) {
+      await this.upsertSessionRecord({
+        sessionId,
+        direction: "incoming",
+        status: "cancelled",
+        roomCode: this.state.roomCode,
+        peerClientId: request.fromClientId,
+        peerName: request.peerName,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        completedAt: null,
+        fileCount: request.files.length,
+        totalSize: request.totalSize,
+        filesMeta: request.files,
+        completedChunks: {},
+        errorMessage: reason,
+      })
+    }
+
+    if (peerName) {
+      this.appendLog(`${peerName} transfer cancelled.`, "warn")
+    }
+    this.clearTransferStatus()
+    await this.refreshHistory()
+    this.notify()
+    return true
+  }
+
+  async performTransferAction() {
+    const action = this.getTransferAction()
+    if (!action) {
+      return false
+    }
+    if (action.type === "cancel_outgoing" || action.type === "stop_outgoing") {
+      return this.cancelOutgoingSession(action.sessionId)
+    }
+    if (action.type === "stop_incoming") {
+      return this.cancelIncomingSession(action.sessionId, "The receiver cancelled the transfer.", true)
+    }
+    return false
   }
 
   async onTransferAccept(message) {
@@ -962,13 +1325,59 @@ class TransferApp {
     if (!session) {
       return
     }
+    const reason = String(message.reason || "").trim()
+    if (reason) {
+      this.appendLog(`${session.peerName} rejected the transfer: ${reason}`, "warn")
+      await this.updateSessionRecord(message.session_id, {
+        status: "rejected",
+        updatedAt: Date.now(),
+        errorMessage: reason,
+      })
+      this.state.outgoingSessions.delete(message.session_id)
+      await this.refreshHistory()
+      return
+    }
     this.appendLog(`${session.peerName} 已拒绝接收。`, "warn")
     await this.updateSessionRecord(message.session_id, {
       status: "rejected",
       updatedAt: Date.now(),
+      errorMessage: null,
     })
     this.state.outgoingSessions.delete(message.session_id)
     await this.refreshHistory()
+  }
+
+  async onTransferCancel(message) {
+    const reason = String(message.reason || "").trim() || "The sender cancelled the transfer."
+    const outgoingSession = this.state.outgoingSessions.get(message.session_id)
+    if (outgoingSession) {
+      await this.finalizeOutgoingCancellation(outgoingSession, reason)
+      return
+    }
+
+    if (
+      this.state.pendingIncomingRequests.has(message.session_id) ||
+      this.incomingChunkState.has(message.session_id) ||
+      (await this.getSessionRecord(message.session_id))
+    ) {
+      await this.cancelIncomingSession(message.session_id, reason, false)
+    }
+  }
+
+  async onTransferAbort(message) {
+    const reason = String(message.reason || "").trim() || "The other side stopped the transfer."
+    const outgoingSession = this.state.outgoingSessions.get(message.session_id)
+    if (outgoingSession) {
+      outgoingSession.cancelRequested = true
+      outgoingSession.cancelReason = reason
+      this.appendLog(reason, "warn")
+      if (!outgoingSession.sending) {
+        await this.finalizeOutgoingCancellation(outgoingSession, reason)
+      }
+      return
+    }
+
+    await this.cancelIncomingSession(message.session_id, reason, false)
   }
 
   async onResumeRequest(message) {
@@ -1022,6 +1431,7 @@ class TransferApp {
       if (transport === "p2p") {
         await waitForChannelOpen(connection)
       }
+      this.assertSessionNotCancelled(session)
       await this.updateSessionRecord(session.sessionId, {
         status: "sending",
         updatedAt: Date.now(),
@@ -1036,6 +1446,7 @@ class TransferApp {
       })
 
       for (const fileMeta of session.files) {
+        this.assertSessionNotCancelled(session)
         const completedChunks = completedMap.has(fileMeta.file_id) ? completedMap.get(fileMeta.file_id) : new Set()
         await this.sendTransferControl(session.peerClientId, transport, connection, {
           type: "file_start",
@@ -1048,6 +1459,7 @@ class TransferApp {
         })
 
         for (let chunkIndex = 0; chunkIndex < fileMeta.chunk_count; chunkIndex += 1) {
+          this.assertSessionNotCancelled(session)
           const chunkSize = Math.min(CHUNK_SIZE, Math.max(fileMeta.size - chunkIndex * CHUNK_SIZE, 0))
           if (completedChunks.has(chunkIndex)) {
             session.sentBytes += chunkSize
@@ -1058,6 +1470,7 @@ class TransferApp {
           const start = chunkIndex * CHUNK_SIZE
           const end = Math.min(start + CHUNK_SIZE, fileMeta.size)
           const buffer = await fileMeta.file.slice(start, end).arrayBuffer()
+          this.assertSessionNotCancelled(session)
           const header = {
             type: "chunk",
             session_id: session.sessionId,
@@ -1068,6 +1481,7 @@ class TransferApp {
           if (transport === "p2p") {
             this.sendDataControl(connection.channel, header)
             await waitForBufferedAmount(connection.channel, buffer.byteLength)
+            this.assertSessionNotCancelled(session)
             connection.channel.send(buffer)
           } else {
             this.sendRelayPayload(session.peerClientId, {
@@ -1103,8 +1517,13 @@ class TransferApp {
         updatedAt: Date.now(),
         completedAt: Date.now(),
       })
+      this.state.outgoingSessions.delete(session.sessionId)
       await this.refreshHistory()
     } catch (error) {
+      if (error instanceof TransferCancelledError) {
+        await this.finalizeOutgoingCancellation(session, error.message)
+        return
+      }
       this.appendLog(`发送中断: ${error.message}`, "danger")
       await this.updateSessionRecord(session.sessionId, {
         status: "pending",
@@ -1265,7 +1684,8 @@ class TransferApp {
       return
     }
 
-    const completed = objectToSets(session.completedChunks)
+    const chunkState = this.ensureIncomingChunkState(session)
+    const completed = chunkState.completedSets
     const fileSet = completed[header.file_id] || new Set()
     if (fileSet.has(header.chunk_index)) {
       return
@@ -1287,11 +1707,13 @@ class TransferApp {
       completedChunks: setsToObject(completed),
     })
 
-    const progress = calculateIncomingProgress(session.filesMeta, completed)
-    this.setTransferStatus(`接收自 ${session.peerName}`, progress.done, progress.total)
+    const progress = calculateIncomingProgress(chunkState.filesMeta, completed)
+    this.setTransferStatus(`Receiving from ${chunkState.peerName || session.peerName}`, progress.done, progress.total)
+    return
   }
 
   async finalizeIncomingFile(message) {
+    await this.flushIncomingChunkState(message.session_id, { status: "pending" })
     const session = await this.getSessionRecord(message.session_id)
     if (!session) {
       return
@@ -1301,15 +1723,20 @@ class TransferApp {
       return
     }
 
+    if (this.shouldSkipChecksum(fileMeta)) {
+      this.appendLog(`Skipping full checksum on mobile for large file: ${fileMeta.relative_path}`, "warn")
+      return
+    }
+
     const blob = await this.buildBlobFromChunks(message.session_id, fileMeta.file_id)
     const checksum = await hashBlob(blob)
     if (checksum !== fileMeta.sha256) {
       this.appendLog(`文件校验失败: ${fileMeta.relative_path}`, "danger")
-      await this.updateSessionRecord(message.session_id, {
+      await this.flushIncomingChunkState(message.session_id, {
         status: "failed",
-        updatedAt: Date.now(),
         completedAt: null,
       })
+      this.clearIncomingChunkState(message.session_id)
       await this.refreshHistory()
       return
     }
@@ -1317,6 +1744,7 @@ class TransferApp {
   }
 
   async finalizeIncomingSession(sessionId) {
+    await this.flushIncomingChunkState(sessionId, { status: "pending" })
     const session = await this.getSessionRecord(sessionId)
     if (!session) {
       return
@@ -1326,19 +1754,20 @@ class TransferApp {
       return
     }
 
-    const files = []
-    for (const fileMeta of session.filesMeta) {
-      const blob = await this.buildBlobFromChunks(sessionId, fileMeta.file_id)
-      files.push({
-        name: fileMeta.relative_path,
-        bytes: new Uint8Array(await blob.arrayBuffer()),
-      })
-    }
-
     try {
-      if (files.length === 1 && !files[0].name.includes("/")) {
-        downloadBlob(new Blob([files[0].bytes]), files[0].name)
+      if (session.filesMeta.length === 1 && !session.filesMeta[0].relative_path.includes("/")) {
+        const fileMeta = session.filesMeta[0]
+        const blob = await this.buildBlobFromChunks(sessionId, fileMeta.file_id)
+        downloadBlob(blob, fileMeta.relative_path)
       } else if (this.options.allowIncomingMultiFile) {
+        const files = []
+        for (const fileMeta of session.filesMeta) {
+          const blob = await this.buildBlobFromChunks(sessionId, fileMeta.file_id)
+          files.push({
+            name: fileMeta.relative_path,
+            bytes: new Uint8Array(await blob.arrayBuffer()),
+          })
+        }
         downloadBlob(createStoredZip(files), `transfer-${sessionId.slice(0, 8)}.zip`)
       } else {
         throw new Error("当前界面只支持接收单文件。")
@@ -1348,12 +1777,12 @@ class TransferApp {
       return
     }
 
-    await this.updateSessionRecord(sessionId, {
+    await this.flushIncomingChunkState(sessionId, {
       status: "completed",
-      updatedAt: Date.now(),
       completedAt: Date.now(),
     })
     await this.clearChunksBySession(sessionId)
+    this.clearIncomingChunkState(sessionId)
     this.appendLog(`接收完成，已保存来自 ${session.peerName} 的文件。`, "info")
     this.clearTransferStatus()
     await this.refreshHistory()
@@ -1452,7 +1881,10 @@ class TransferApp {
   }
 
   async getChunksBySession(sessionId, fileId) {
-    const all = (await this.runTransaction(CHUNK_STORE, "readonly", (store) => idbRequest(store.getAll()))) || []
+    const all = (await this.runTransaction(CHUNK_STORE, "readonly", (store) => {
+      const index = store.index("sessionId")
+      return idbRequest(index.getAll(sessionId))
+    })) || []
     return all
       .filter((item) => item.sessionId === sessionId && item.fileId === fileId)
       .sort((a, b) => a.chunkIndex - b.chunkIndex)
@@ -1464,8 +1896,10 @@ class TransferApp {
   }
 
   async clearChunksBySession(sessionId) {
-    const chunks = (await this.runTransaction(CHUNK_STORE, "readonly", (store) => idbRequest(store.getAll()))) || []
-    const targets = chunks.filter((item) => item.sessionId === sessionId)
+    const targets = (await this.runTransaction(CHUNK_STORE, "readonly", (store) => {
+      const index = store.index("sessionId")
+      return idbRequest(index.getAll(sessionId))
+    })) || []
     await this.runTransaction(CHUNK_STORE, "readwrite", (store) => {
       targets.forEach((item) => store.delete(item.chunkKey))
     })
@@ -1515,6 +1949,32 @@ function openDatabase() {
     }
     request.onsuccess = () => resolve(request.result)
   })
+}
+
+function detectRuntimeCapabilities() {
+  const userAgent = navigator.userAgent || ""
+  const isIPhone = /iPhone/i.test(userAgent)
+  const isIPad = /iPad/i.test(userAgent) || (/Macintosh/i.test(userAgent) && "ontouchend" in document)
+  const isAndroid = /Android/i.test(userAgent)
+  const isWebKit = /AppleWebKit/i.test(userAgent)
+  const isCriOS = /CriOS/i.test(userAgent)
+  const isFxiOS = /FxiOS/i.test(userAgent)
+  const isEdgiOS = /EdgiOS/i.test(userAgent)
+  const isIOSSafari = (isIPhone || isIPad) && isWebKit && !isCriOS && !isFxiOS && !isEdgiOS
+  const isIOSWebKitBrowser = (isIPhone || isIPad) && isWebKit
+  return {
+    isAndroid,
+    isIOSSafari,
+    isIOSWebKitBrowser,
+    isMobileBrowser: isIPhone || isIPad || isAndroid,
+  }
+}
+
+class TransferCancelledError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = "TransferCancelledError"
+  }
 }
 
 async function waitForChannelOpen(connection) {
