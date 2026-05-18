@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read release version from tag
+        id: release_version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^v(?<version>\d+\.\d+\.\d+)$')
+          {
+            throw "Release tags must use the v<major>.<minor>.<patch> format, for example v1.0.3."
+          }
+
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "app_version=$($Matches.version)"
+
+      - name: Build package
+        id: package
+        shell: pwsh
+        run: .\scripts\Build-Package.ps1 -Python "python" -Version "${{ steps.release_version.outputs.app_version }}" -VersionSuffix $env:GITHUB_REF_NAME
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"))
+          {
+            throw "ISCC.exe was not found after installing Inno Setup."
+          }
+
+      - name: Build installer
+        id: installer
+        shell: pwsh
+        run: .\scripts\Build-Installer.ps1 -Version "${{ steps.release_version.outputs.app_version }}" -PublishDir "${{ steps.package.outputs.package_dir }}" -InnoSetupCompiler "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME "${{ steps.package.outputs.zip_path }}" "${{ steps.installer.outputs.installer_path }}" `
+            --title "FileTransfer $env:GITHUB_REF_NAME" `
+            --notes "Automated release for $env:GITHUB_REF_NAME."

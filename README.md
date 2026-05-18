@@ -55,6 +55,22 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 - 完整分发包里仍会附带 `FileTransferServer.exe`，主要用于诊断和独立测试
 - 首次运行如果 Windows 弹出防火墙提示，需要允许访问
 
+## GitHub Release 自动打包
+
+推送 `v<major>.<minor>.<patch>` 格式的 tag 后，GitHub Actions 会在 Windows runner 上构建：
+
+- `FileTransfer-win-x64-onefile-*.zip`
+- `FileTransfer-<version>-setup.exe`
+
+本地也可以使用同一套脚本：
+
+```powershell
+.\scripts\Build-Package.ps1 -Version "1.0.0" -VersionSuffix "local"
+.\scripts\Build-Installer.ps1 -Version "1.0.0"
+```
+
+安装器会同时安装 `FileTransfer.exe` 和 `FileTransferServer.exe`。
+
 ## 当前边界
 
 - 主要面向 Chromium 系浏览器
