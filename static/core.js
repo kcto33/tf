@@ -5,6 +5,7 @@ const SESSION_STORE = "sessions"
 const CHUNK_STORE = "chunks"
 const MAX_BUFFERED_AMOUNT = 4 * 1024 * 1024
 const MAX_LOGS = 80
+const TERMINAL_SESSION_STATUSES = new Set(["completed", "rejected", "cancelled", "failed"])
 const RELAY_MAX_TRANSFER_BYTES = 64 * 1024 * 1024
 const IOS_SAFARI_MAX_INCOMING_BYTES = 1536 * 1024 * 1024
 const SESSION_PROGRESS_BATCH_SIZE = 32
@@ -2005,6 +2006,9 @@ class TransferApp {
     if (!session) {
       return
     }
+    if (isTerminalSessionStatus(session.status)) {
+      return
+    }
 
     const chunkState = this.ensureIncomingChunkState(session)
     const completed = chunkState.completedSets
@@ -2036,11 +2040,14 @@ class TransferApp {
   }
 
   async finalizeIncomingFile(message) {
-    await this.flushIncomingChunkState(message.session_id, { status: "pending" })
     const session = await this.getSessionRecord(message.session_id)
     if (!session) {
       return
     }
+    if (isTerminalSessionStatus(session.status)) {
+      return
+    }
+    await this.flushIncomingChunkState(message.session_id, { status: "pending" })
     const fileMeta = session.filesMeta.find((item) => item.file_id === message.file_id)
     if (!fileMeta) {
       return
@@ -2067,7 +2074,6 @@ class TransferApp {
   }
 
   async finalizeIncomingSession(sessionId) {
-    await this.flushIncomingChunkState(sessionId, { status: "pending" })
     const session = await this.getSessionRecord(sessionId)
     if (!session) {
       return
@@ -2076,6 +2082,10 @@ class TransferApp {
       this.appendLog(`会话 ${sessionId.slice(0, 8)} 校验失败，已停止保存。`, "danger")
       return
     }
+    if (isTerminalSessionStatus(session.status)) {
+      return
+    }
+    await this.flushIncomingChunkState(sessionId, { status: "pending" })
 
     try {
       if (session.filesMeta.length === 1 && !session.filesMeta[0].relative_path.includes("/")) {
@@ -2259,6 +2269,10 @@ function idbRequest(request) {
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
+}
+
+function isTerminalSessionStatus(status) {
+  return TERMINAL_SESSION_STATUSES.has(status)
 }
 
 function openDatabase() {
