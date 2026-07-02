@@ -7,7 +7,7 @@ import {
   formatChatTime,
   formatFileSummary,
   formatTransferSpeed,
-} from "./core.js?v=10"
+} from "./core.js?v=11"
 
 const app = createTransferApp({
   allowMultipleFiles: false,

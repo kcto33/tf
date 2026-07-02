@@ -1,14 +1,19 @@
-const CHUNK_SIZE = 64 * 1024
+const CHUNK_SIZE = 256 * 1024
 const DB_NAME = "web-transfer-db"
 const DB_VERSION = 1
 const SESSION_STORE = "sessions"
 const CHUNK_STORE = "chunks"
+const DEFAULT_ROOM_CODE = "DEFAULT"
+const DISPLAY_NAME_STORAGE_KEY = "web-transfer-display-name"
+const ROOM_CODE_STORAGE_KEY = "web-transfer-room-code"
 const MAX_BUFFERED_AMOUNT = 4 * 1024 * 1024
 const MAX_LOGS = 80
 const TERMINAL_SESSION_STATUSES = new Set(["completed", "rejected", "cancelled", "failed"])
 const RELAY_MAX_TRANSFER_BYTES = 64 * 1024 * 1024
 const IOS_SAFARI_MAX_INCOMING_BYTES = 1536 * 1024 * 1024
 const SESSION_PROGRESS_BATCH_SIZE = 32
+const INCOMING_SESSION_FLUSH_BATCH_SIZE = 32
+const INCOMING_SESSION_FLUSH_INTERVAL_MS = 500
 const MOBILE_SKIP_CHECKSUM_BYTES = 128 * 1024 * 1024
 const SESSION_RECEIVE_ACK_TIMEOUT_MS = 20000
 const DEFAULT_ICE_SERVERS = [
@@ -179,15 +184,20 @@ class TransferApp {
     if (this.runtime.isIOSWebKitBrowser) {
       this.appendLog("Large-file receive on iPhone browsers is limited. Safer limits are enabled.", "warn")
     }
+    if (!this.isConnected() && this.state.formRoomCode) {
+      await this.connectToRoom(this.state.formRoomCode, this.state.formDisplayName)
+    }
     this.notify()
   }
 
   restoreFormState() {
     const params = new URLSearchParams(window.location.search)
-    const displayName = params.get("name") || localStorage.getItem("web-transfer-display-name") || ""
-    const roomCode = params.get("room") || localStorage.getItem("web-transfer-room-code") || ""
+    const displayName = params.get("name") || localStorage.getItem(DISPLAY_NAME_STORAGE_KEY) || makeDefaultDisplayName()
+    const roomCode = params.get("room") || localStorage.getItem(ROOM_CODE_STORAGE_KEY) || DEFAULT_ROOM_CODE
     this.state.formDisplayName = displayName
     this.state.formRoomCode = roomCode
+    localStorage.setItem(DISPLAY_NAME_STORAGE_KEY, displayName)
+    localStorage.setItem(ROOM_CODE_STORAGE_KEY, roomCode)
   }
 
   getInitialFormState() {
@@ -419,6 +429,7 @@ class TransferApp {
         completedSets: objectToSets(session.completedChunks),
         dirtyCount: 0,
         createdAt: session.createdAt || Date.now(),
+        lastSessionFlushAt: Date.now(),
         lastReportedBytes: initialProgress.done,
         pendingProgressCount: 0,
         lastProgressSentAt: 0,
@@ -437,6 +448,7 @@ class TransferApp {
       return
     }
     chunkState.dirtyCount = 0
+    chunkState.lastSessionFlushAt = Date.now()
     await this.updateSessionRecord(sessionId, {
       completedChunks: setsToObject(chunkState.completedSets),
       updatedAt: Date.now(),
@@ -659,8 +671,8 @@ class TransferApp {
       this.state.formRoomCode = roomCode
       this.state.formDisplayName = displayName
       this.state.clientId = makeId()
-      localStorage.setItem("web-transfer-display-name", displayName)
-      localStorage.setItem("web-transfer-room-code", roomCode)
+      localStorage.setItem(DISPLAY_NAME_STORAGE_KEY, displayName)
+      localStorage.setItem(ROOM_CODE_STORAGE_KEY, roomCode)
 
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:"
       const socket = new WebSocket(`${protocol}//${window.location.host}/ws/signaling`)
@@ -2027,11 +2039,14 @@ class TransferApp {
 
     fileSet.add(header.chunk_index)
     completed[header.file_id] = fileSet
-    await this.updateSessionRecord(header.session_id, {
-      status: "pending",
-      updatedAt: Date.now(),
-      completedChunks: setsToObject(completed),
-    })
+    chunkState.dirtyCount = (chunkState.dirtyCount || 0) + 1
+    const now = Date.now()
+    const shouldFlushSession =
+      chunkState.dirtyCount >= INCOMING_SESSION_FLUSH_BATCH_SIZE ||
+      now - (chunkState.lastSessionFlushAt || 0) >= INCOMING_SESSION_FLUSH_INTERVAL_MS
+    if (shouldFlushSession) {
+      await this.flushIncomingChunkState(header.session_id, { status: "pending" })
+    }
 
     const progress = calculateIncomingProgress(chunkState.filesMeta, completed)
     this.setTransferStatus(`Receiving from ${chunkState.peerName || session.peerName}`, progress.done, progress.total)
@@ -2338,9 +2353,40 @@ async function waitForChannelOpen(connection) {
 }
 
 async function waitForBufferedAmount(channel, nextSize) {
-  while (channel.bufferedAmount + nextSize > MAX_BUFFERED_AMOUNT) {
-    await delay(40)
+  if (channel.bufferedAmount + nextSize <= MAX_BUFFERED_AMOUNT) {
+    return
   }
+  await new Promise((resolve) => {
+    let settled = false
+    const lowThreshold = Math.max(MAX_BUFFERED_AMOUNT - nextSize, 0)
+    const cleanup = () => {
+      if (settled) {
+        return
+      }
+      settled = true
+      if (typeof channel.removeEventListener === "function") {
+        channel.removeEventListener("bufferedamountlow", onBufferedAmountLow)
+      }
+      window.clearInterval(timer)
+      resolve()
+    }
+    const onBufferedAmountLow = () => {
+      if (channel.bufferedAmount + nextSize <= MAX_BUFFERED_AMOUNT) {
+        cleanup()
+      }
+    }
+
+    try {
+      channel.bufferedAmountLowThreshold = lowThreshold
+    } catch (error) {
+      void error
+    }
+    if (typeof channel.addEventListener === "function") {
+      channel.addEventListener("bufferedamountlow", onBufferedAmountLow)
+    }
+    const timer = window.setInterval(onBufferedAmountLow, 80)
+    onBufferedAmountLow()
+  })
 }
 
 function delay(ms) {
@@ -2427,9 +2473,10 @@ function calculateIncomingProgress(filesMeta, completedSets) {
   for (const fileMeta of filesMeta) {
     total += fileMeta.size
     const set = completedSets[fileMeta.file_id] || new Set()
+    const chunkSize = fileMeta.chunk_size || fileMeta.chunkSize || CHUNK_SIZE
     for (const index of set) {
-      const start = index * CHUNK_SIZE
-      const end = Math.min(start + CHUNK_SIZE, fileMeta.size)
+      const start = index * chunkSize
+      const end = Math.min(start + chunkSize, fileMeta.size)
       done += end - start
     }
   }
@@ -2473,6 +2520,19 @@ function walkEntry(entry, prefix = "") {
     }
     readBatch()
   })
+}
+
+function makeDefaultDisplayName() {
+  const bytes = new Uint8Array(3)
+  if (globalThis.crypto && globalThis.crypto.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes)
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256)
+    }
+  }
+  const suffix = Array.from(bytes, (item) => item.toString(16).padStart(2, "0")).join("").toUpperCase()
+  return `设备-${suffix}`
 }
 
 function makeId() {

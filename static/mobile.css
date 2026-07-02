@@ -17,13 +17,17 @@
   --shadow: 0 18px 40px rgba(77, 47, 28, 0.12);
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
+  min-width: 0;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
+  overflow-x: hidden;
   font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
   color: var(--text);
   background:
@@ -51,12 +55,15 @@ textarea {
 }
 
 button {
+  max-width: 100%;
   border: none;
   border-radius: 16px;
   padding: 14px 18px;
   background: linear-gradient(135deg, #d56735, #b4491b);
   color: #fff;
   box-shadow: 0 14px 30px rgba(180, 73, 27, 0.18);
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 button:disabled {
@@ -76,9 +83,11 @@ button:disabled {
   margin: 16px auto 28px;
   display: grid;
   gap: 14px;
+  max-width: 100%;
 }
 
 .mobile-card {
+  max-width: 100%;
   background: var(--card);
   border: 1px solid rgba(255, 255, 255, 0.72);
   border-radius: 24px;
@@ -97,8 +106,8 @@ button:disabled {
   position: absolute;
   width: 180px;
   height: 180px;
-  right: -48px;
-  top: -64px;
+  right: 0;
+  top: 0;
   border-radius: 999px;
   background: radial-gradient(circle, rgba(203, 93, 47, 0.16), transparent 70%);
 }
@@ -106,10 +115,11 @@ button:disabled {
 .eyebrow {
   margin: 0 0 10px;
   color: var(--accent-strong);
-  letter-spacing: 0.18em;
+  letter-spacing: 0;
   text-transform: uppercase;
   font-size: 11px;
   font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .hero-head,
@@ -132,11 +142,13 @@ p {
 h1 {
   font-size: clamp(30px, 11vw, 48px);
   line-height: 0.98;
-  letter-spacing: -0.04em;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
 }
 
 h2 {
   font-size: 20px;
+  overflow-wrap: anywhere;
 }
 
 .lede,
@@ -146,13 +158,16 @@ h2 {
 .chat-item p {
   color: var(--muted);
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .switch-link {
+  max-width: 100%;
   color: var(--accent-strong);
   text-decoration: none;
   font-size: 14px;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .form-stack,
@@ -177,6 +192,7 @@ span,
 input[type="text"],
 textarea {
   width: 100%;
+  max-width: 100%;
   border: 1px solid var(--line);
   border-radius: 16px;
   padding: 13px 14px;
@@ -193,6 +209,7 @@ textarea {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+  min-width: 0;
 }
 
 .button-row.compact button {
@@ -207,12 +224,16 @@ textarea {
 }
 
 .badge {
+  max-width: 100%;
   border-radius: 999px;
   padding: 6px 10px;
   font-size: 12px;
   font-weight: 800;
   background: var(--ok-soft);
   color: var(--ok);
+  overflow-wrap: anywhere;
+  white-space: normal;
+  text-align: center;
 }
 
 .badge.muted {
@@ -291,6 +312,7 @@ textarea {
 .chat-item,
 .status-item {
   width: 100%;
+  max-width: 100%;
   border: 1px solid var(--line);
   border-radius: 18px;
   padding: 14px;
@@ -302,16 +324,17 @@ textarea {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
 .selection-item-header strong {
   min-width: 0;
   line-height: 1.45;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .selection-remove {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   min-width: 58px;
 }
 
@@ -400,6 +423,7 @@ textarea {
 .peer-name {
   font-size: 14px;
   line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .peer-meta {
@@ -413,6 +437,7 @@ textarea {
 }
 
 .upload-button {
+  max-width: 100%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -423,6 +448,27 @@ textarea {
   border: 1px dashed rgba(203, 93, 47, 0.28);
   color: var(--accent-strong);
   font-weight: 800;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.hero-head > *,
+.section-head > *,
+.button-row > *,
+.status-strip > *,
+.pending-card > *,
+.selection-item-header > *,
+.chat-item > *,
+.status-item > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.subtle,
+.subtle strong,
+.pending-title,
+.status-item strong {
+  overflow-wrap: anywhere;
 }
 
 .chat-item.outgoing {
@@ -442,6 +488,16 @@ textarea {
 .status-item strong {
   display: block;
   margin-bottom: 6px;
+}
+
+.selection-item p,
+.chat-item,
+.chat-item strong {
+  overflow-wrap: anywhere;
+}
+
+.chat-item strong {
+  display: block;
 }
 
 .peer-list::-webkit-scrollbar,
