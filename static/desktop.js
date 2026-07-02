@@ -7,8 +7,9 @@ import {
   formatBytes,
   formatChatTime,
   formatFileSummary,
+  formatTransferSpeed,
   historyBadgeClass,
-} from "./core.js"
+} from "./core.js?v=11"
 
 const app = createTransferApp({
   allowMultipleFiles: true,
@@ -40,6 +41,7 @@ const els = {
   chatList: document.querySelector("#chatList"),
   chatInput: document.querySelector("#chatInput"),
   chatSendBtn: document.querySelector("#chatSendBtn"),
+  transferActionBtn: document.querySelector("#transferActionBtn"),
   transferBadge: document.querySelector("#transferBadge"),
   transferLog: document.querySelector("#transferLog"),
   historyList: document.querySelector("#historyList"),
@@ -80,12 +82,15 @@ function bindEvents() {
   els.disconnectBtn.addEventListener("click", () => app.disconnectFromRoom())
   els.fileInput.addEventListener("change", (event) => {
     app.setSelectedFiles(collectInputFiles(event.target.files))
+    event.target.value = ""
   })
   els.directoryInput.addEventListener("change", (event) => {
     app.setSelectedFiles(collectInputFiles(event.target.files))
+    event.target.value = ""
   })
   els.sendBtn.addEventListener("click", () => app.startTransferRequest())
   els.clearHistoryBtn.addEventListener("click", () => app.clearHistory())
+  els.transferActionBtn.addEventListener("click", () => app.performTransferAction())
   els.chatSendBtn.addEventListener("click", sendChatMessage)
   els.chatInput.addEventListener("input", renderAll)
   els.chatInput.addEventListener("keydown", async (event) => {
@@ -121,26 +126,42 @@ async function sendChatMessage() {
 function renderAll() {
   const wsReady = app.isConnected()
   const state = app.state
-  const selectedPeer = app.getSelectedPeer()
-  const selectedConnection = selectedPeer ? app.getConnection(selectedPeer.client_id) : null
-  const canRelay = Boolean(wsReady && selectedPeer)
-  const isDirectReady = Boolean(selectedConnection && selectedConnection.channelState === "open")
+  const chatPeer = app.getSelectedPeer()
+  const chatConnection = chatPeer ? app.getConnection(chatPeer.client_id) : null
+  const selectedTransferPeers = app.getSelectedTransferPeers()
+  const canSend = Boolean(wsReady && selectedTransferPeers.length)
+  const canChat = Boolean(wsReady && chatPeer)
+  const isChatDirectReady = Boolean(chatConnection && chatConnection.channelState === "open")
+  const hasDirectTransfer = selectedTransferPeers.some((peer) => {
+    const connection = app.getConnection(peer.client_id)
+    return Boolean(connection && connection.channelState === "open")
+  })
+  const hasRelayTransfer = selectedTransferPeers.some((peer) => !app.getOpenConnection(peer.client_id))
+  const sendSummary = formatSelectedPeerSummary(selectedTransferPeers)
 
   els.connectionBadge.textContent = wsReady ? `房间 ${state.roomCode}` : "未连接"
   els.connectionBadge.className = wsReady ? "badge" : "badge muted"
   els.localClientId.textContent = state.clientId || "-"
   els.peerCount.textContent = `${state.peers.size} 台`
-  els.peerSummary.textContent = selectedPeer ? selectedPeer.display_name : "-"
-  els.selectedPeerName.textContent = selectedPeer ? selectedPeer.display_name : "-"
-  els.channelState.textContent = (selectedConnection && selectedConnection.channelState) || "-"
-  els.sendHint.textContent = isDirectReady ? "可发起直连传输" : canRelay ? "可发起中继传输" : "等待目标设备"
-  els.sendHint.className = canRelay ? "badge" : "badge muted"
-  els.chatHint.textContent = isDirectReady ? "可直连消息" : canRelay ? "可中继消息" : "等待目标设备"
-  els.chatHint.className = canRelay ? "badge" : "badge muted"
+  els.peerSummary.textContent = sendSummary
+  els.selectedPeerName.textContent = sendSummary
+  els.chatPeerName.textContent = chatPeer ? chatPeer.display_name : "-"
+  els.channelState.textContent = (chatConnection && chatConnection.channelState) || "-"
+  els.sendHint.textContent = !canSend
+    ? "等待目标设备"
+    : hasDirectTransfer && hasRelayTransfer
+      ? "部分设备直连可用"
+      : hasDirectTransfer
+        ? "可发起直连传输"
+        : "可发起中继传输"
+  els.sendHint.className = canSend ? "badge" : "badge muted"
+  els.chatHint.textContent = isChatDirectReady ? "可直连消息" : canChat ? "可中继消息" : "等待目标设备"
+  els.chatHint.className = canChat ? "badge" : "badge muted"
   els.connectBtn.disabled = wsReady
   els.disconnectBtn.disabled = !wsReady
-  els.sendBtn.disabled = !(canRelay && state.selectedFiles.length)
-  els.chatSendBtn.disabled = !(canRelay && els.chatInput.value.trim())
+  els.sendBtn.disabled = !(canSend && state.selectedFiles.length)
+  els.chatSendBtn.disabled = !(canChat && els.chatInput.value.trim())
+  renderTransferAction()
 
   renderPeerList()
   renderSelection()
@@ -149,6 +170,13 @@ function renderAll() {
   renderChatMessages()
   renderTransferLog()
   updateSwitchLink()
+}
+
+function renderTransferAction() {
+  const action = app.getTransferAction()
+  els.transferActionBtn.hidden = !action
+  els.transferActionBtn.disabled = !action
+  els.transferActionBtn.textContent = action ? action.label : "停止传输"
 }
 
 function renderPeerList() {
@@ -162,8 +190,12 @@ function renderPeerList() {
   els.peerList.className = "peer-list"
   for (const peer of app.state.peers.values()) {
     const node = els.peerCardTemplate.content.firstElementChild.cloneNode(true)
+    const cardButton = node.querySelector(".peer-card-button")
+    const toggleButton = node.querySelector(".peer-send-toggle")
     const connection = app.getConnection(peer.client_id)
     const unread = app.getUnreadCount(peer.client_id)
+    const isChatSelected = peer.client_id === app.state.selectedPeerId
+    const isSendSelected = app.isTransferPeerSelected(peer.client_id)
     const channelLabel = connection
       ? connection.channelState === "open"
         ? "直连可用"
@@ -173,12 +205,31 @@ function renderPeerList() {
     node.querySelector(".peer-meta").textContent = `${peer.client_id.slice(0, 8)} · ${(connection && connection.connectionState) || "new"}`
     node.querySelector(".peer-badge").textContent = unread ? `${channelLabel} · ${unread} 条新消息` : channelLabel
     node.querySelector(".peer-badge").classList.toggle("has-unread", unread > 0)
-    node.addEventListener("click", () => app.selectPeer(peer.client_id))
-    if (peer.client_id === app.state.selectedPeerId) {
+    toggleButton.textContent = isSendSelected ? "已选发送" : "加入发送"
+    toggleButton.classList.toggle("active", isSendSelected)
+    cardButton.addEventListener("click", () => app.selectPeer(peer.client_id))
+    toggleButton.addEventListener("click", () => app.toggleTransferPeer(peer.client_id))
+    if (isChatSelected) {
       node.classList.add("selected")
+    }
+    if (isSendSelected) {
+      node.classList.add("send-selected")
     }
     els.peerList.append(node)
   }
+}
+
+function formatSelectedPeerSummary(peers) {
+  if (!peers.length) {
+    return "-"
+  }
+  if (peers.length === 1) {
+    return peers[0].display_name
+  }
+  if (peers.length === 2) {
+    return `${peers[0].display_name}、${peers[1].display_name}`
+  }
+  return `${peers[0].display_name} 等 ${peers.length} 台设备`
 }
 
 function renderSelection() {
@@ -190,15 +241,19 @@ function renderSelection() {
   }
 
   els.selectionList.className = "selection-list"
-  for (const item of app.state.selectedFiles) {
+  app.state.selectedFiles.forEach((item, index) => {
     const row = document.createElement("div")
     row.className = "selection-item"
     row.innerHTML = `
-      <strong>${escapeHtml(item.relativePath)}</strong>
+      <div class="selection-item-header">
+        <strong>${escapeHtml(item.relativePath)}</strong>
+        <button type="button" class="ghost small selection-remove">删除</button>
+      </div>
       <p class="selection-meta">${formatBytes(item.file.size)}</p>
     `
+    row.querySelector(".selection-remove").addEventListener("click", () => app.removeSelectedFile(index))
     els.selectionList.append(row)
-  }
+  })
 }
 
 function renderPendingTransfers() {
@@ -294,9 +349,10 @@ function renderTransferLog() {
       <strong>${escapeHtml(transferStatus.label)} ${transferStatus.percent}%</strong>
       <div class="progress-bar"><span style="width: ${transferStatus.percent}%"></span></div>
       <p>${formatBytes(transferStatus.done)} / ${formatBytes(transferStatus.total)}</p>
+      <p>速度 ${formatTransferSpeed(transferStatus.speed)}</p>
     `
     els.transferLog.append(row)
-    els.transferBadge.textContent = `${transferStatus.label} ${transferStatus.percent}%`
+    els.transferBadge.textContent = `速度 ${formatTransferSpeed(transferStatus.speed)}`
     els.transferBadge.className = "badge"
   } else {
     els.transferBadge.textContent = "空闲"

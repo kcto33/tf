@@ -19,13 +19,17 @@
   --shadow: 0 20px 70px rgba(70, 38, 14, 0.12);
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
+  min-width: 0;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
+  overflow-x: hidden;
   color: var(--text);
   font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
   background:
@@ -49,9 +53,11 @@ body::before {
 .page {
   width: min(1240px, calc(100vw - 28px));
   margin: 28px auto 40px;
+  max-width: 100%;
 }
 
 .panel {
+  max-width: 100%;
   background: var(--panel);
   border: 1px solid rgba(255, 255, 255, 0.58);
   border-radius: 26px;
@@ -72,8 +78,8 @@ body::before {
 .hero::after {
   content: "";
   position: absolute;
-  right: -40px;
-  top: -80px;
+  right: 0;
+  top: 0;
   width: 240px;
   height: 240px;
   border-radius: 999px;
@@ -83,10 +89,11 @@ body::before {
 .eyebrow {
   margin: 0 0 10px;
   color: var(--accent-strong);
-  letter-spacing: 0.16em;
+  letter-spacing: 0;
   text-transform: uppercase;
   font-size: 12px;
   font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 h1,
@@ -97,12 +104,14 @@ h2 {
 h1 {
   font-size: clamp(36px, 6vw, 64px);
   line-height: 0.94;
-  letter-spacing: -0.04em;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
 }
 
 h2 {
   font-size: 22px;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
 }
 
 .lede {
@@ -111,6 +120,7 @@ h2 {
   color: var(--muted);
   font-size: 16px;
   line-height: 1.7;
+  overflow-wrap: anywhere;
 }
 
 .connection-grid,
@@ -123,10 +133,19 @@ h2 {
 .grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-bottom: 20px;
+  align-items: stretch;
 }
 
 .chat-grid {
   grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.grid > .panel,
+.chat-grid > .panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .connection-grid {
@@ -153,6 +172,7 @@ button {
 
 input[type="text"] {
   width: 100%;
+  max-width: 100%;
   border: 1px solid var(--line);
   border-radius: 16px;
   padding: 12px 14px;
@@ -162,6 +182,7 @@ input[type="text"] {
 
 button,
 .buttonlike {
+  max-width: 100%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -173,11 +194,14 @@ button,
   color: #fff;
   cursor: pointer;
   text-decoration: none;
+  overflow-wrap: anywhere;
+  white-space: normal;
   transition: transform 140ms ease, box-shadow 140ms ease, opacity 140ms ease, background 140ms ease;
   box-shadow: 0 12px 28px rgba(180, 73, 27, 0.18);
 }
 
 .view-switch {
+  max-width: 100%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -185,6 +209,7 @@ button,
   font-size: 14px;
   font-weight: 700;
   text-decoration: none;
+  overflow-wrap: anywhere;
 }
 
 .view-switch:hover {
@@ -223,6 +248,7 @@ button:disabled {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
+  min-width: 0;
 }
 
 .button-row.compact {
@@ -234,16 +260,35 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
   margin-bottom: 16px;
 }
 
+.section-head > *,
+.button-row > *,
+.history-title-row > *,
+.chat-item-header > *,
+.pending-card > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.section-head h2 {
+  min-width: 0;
+  line-height: 1.25;
+}
+
 .badge {
+  max-width: 100%;
   border-radius: 999px;
   padding: 6px 10px;
   font-size: 12px;
   font-weight: 800;
   background: var(--ok-soft);
   color: var(--ok);
+  overflow-wrap: anywhere;
+  white-space: normal;
+  text-align: center;
 }
 
 .badge.muted {
@@ -269,12 +314,18 @@ dd {
   margin: 0;
   font-size: 14px;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .selected-peer-line {
   margin: -6px 0 14px;
   color: var(--muted);
   font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.selected-peer-line strong {
+  overflow-wrap: anywhere;
 }
 
 .peer-list,
@@ -299,21 +350,60 @@ dd {
   padding: 14px;
 }
 
+.peer-list,
+.selection-list,
+.history-list,
+.stack,
+.log,
+.chat-list {
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+
+#peerList {
+  flex: 1 1 auto;
+  max-height: 240px;
+}
+
+#pendingTransfers {
+  flex: 0 0 auto;
+  max-height: 148px;
+  margin-top: auto;
+}
+
+#selectionList {
+  flex: 1 1 auto;
+  max-height: 228px;
+}
+
+#historyList,
+#transferLog {
+  flex: 1 1 auto;
+  max-height: 440px;
+}
+
+#chatList {
+  flex: 1 1 auto;
+  max-height: 340px;
+}
+
 .peer-list {
   display: grid;
-  gap: 10px;
-  margin-bottom: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+  align-items: start;
 }
 
 .peer-card {
   width: 100%;
-  text-align: left;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 14px 16px;
-  border-radius: 18px;
+  max-width: 100%;
+  display: grid;
+  gap: 7px;
+  padding: 10px 11px;
+  border-radius: 16px;
   border: 1px solid transparent;
   background: rgba(255, 255, 255, 0.72);
   color: var(--text);
@@ -324,25 +414,91 @@ dd {
   background: rgba(255, 255, 255, 0.95);
 }
 
+.peer-card.send-selected {
+  border-color: rgba(34, 140, 111, 0.26);
+  background: linear-gradient(135deg, rgba(34, 140, 111, 0.1), rgba(255, 255, 255, 0.94));
+}
+
 .peer-card.selected {
   border-color: rgba(203, 93, 47, 0.3);
   background: linear-gradient(135deg, rgba(203, 93, 47, 0.12), rgba(255, 255, 255, 0.96));
 }
 
-.peer-card-main {
-  display: grid;
-  gap: 4px;
+.peer-card.selected.send-selected {
+  background: linear-gradient(135deg, rgba(203, 93, 47, 0.1), rgba(34, 140, 111, 0.08), rgba(255, 255, 255, 0.96));
+}
+
+.peer-card-button {
+  width: 100%;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  box-shadow: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
   min-width: 0;
 }
 
+.peer-card-button:hover,
+.peer-card-button:active {
+  transform: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.peer-card-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.peer-card-button .peer-badge {
+  flex: 0 1 104px;
+  min-width: 78px;
+  max-width: 104px;
+  padding: 4px 7px;
+  font-size: 11px;
+  line-height: 1.2;
+  max-height: 2.4em;
+  text-align: center;
+  white-space: normal;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.peer-send-toggle {
+  align-self: flex-start;
+  padding: 6px 9px;
+  border-radius: 14px;
+  font-size: 12px;
+}
+
+.peer-send-toggle.active {
+  background: rgba(34, 140, 111, 0.14);
+  color: rgb(20, 106, 84);
+  border-color: transparent;
+}
+
 .peer-name {
-  font-size: 15px;
+  font-size: 13px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .peer-meta {
   margin: 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .peer-badge.has-unread {
@@ -384,6 +540,25 @@ dd {
   border-bottom: 1px solid rgba(76, 57, 39, 0.1);
 }
 
+.selection-item-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.selection-item-header strong {
+  min-width: 0;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.selection-remove {
+  flex: 0 1 auto;
+  min-width: 58px;
+}
+
 .selection-item:first-child,
 .history-item:first-child,
 .log-item:first-child,
@@ -409,6 +584,7 @@ dd {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .history-item {
@@ -437,10 +613,13 @@ dd {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
 .history-title {
   font-size: 15px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .history-files {
@@ -448,6 +627,7 @@ dd {
   font-size: 13px;
   line-height: 1.6;
   color: #4a3e34;
+  overflow-wrap: anywhere;
 }
 
 .pending-card {
@@ -456,6 +636,13 @@ dd {
 
 .pending-title {
   font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.log-item strong,
+.chat-item-header strong,
+.chat-time {
+  overflow-wrap: anywhere;
 }
 
 .log-item.progress {
@@ -468,9 +655,7 @@ dd {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  min-height: 260px;
-  max-height: 420px;
-  overflow-y: auto;
+  max-height: none;
 }
 
 .chat-item {
@@ -503,7 +688,7 @@ dd {
   margin: 0;
   line-height: 1.6;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .chat-time {
@@ -520,6 +705,7 @@ dd {
 
 .chat-compose textarea {
   width: 100%;
+  max-width: 100%;
   resize: vertical;
   min-height: 88px;
   border: 1px solid var(--line);
@@ -545,6 +731,36 @@ dd {
   transition: width 150ms ease;
 }
 
+.peer-list::-webkit-scrollbar,
+.selection-list::-webkit-scrollbar,
+.history-list::-webkit-scrollbar,
+.stack::-webkit-scrollbar,
+.log::-webkit-scrollbar,
+.chat-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.peer-list::-webkit-scrollbar-thumb,
+.selection-list::-webkit-scrollbar-thumb,
+.history-list::-webkit-scrollbar-thumb,
+.stack::-webkit-scrollbar-thumb,
+.log::-webkit-scrollbar-thumb,
+.chat-list::-webkit-scrollbar-thumb {
+  background: rgba(148, 58, 21, 0.22);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.peer-list::-webkit-scrollbar-track,
+.selection-list::-webkit-scrollbar-track,
+.history-list::-webkit-scrollbar-track,
+.stack::-webkit-scrollbar-track,
+.log::-webkit-scrollbar-track,
+.chat-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 @media (max-width: 920px) {
   .hero,
   .grid {
@@ -563,5 +779,37 @@ dd {
   .panel {
     padding: 18px;
     border-radius: 20px;
+  }
+
+  .grid > .panel,
+  .chat-grid > .panel {
+    min-height: 0;
+  }
+
+  #peerList {
+    max-height: 220px;
+  }
+
+  #pendingTransfers {
+    max-height: 132px;
+  }
+
+  #selectionList {
+    max-height: 208px;
+  }
+
+  #historyList,
+  #transferLog {
+    max-height: 360px;
+  }
+
+  #chatList {
+    max-height: 300px;
+  }
+}
+
+@media (max-width: 640px) {
+  .peer-list {
+    grid-template-columns: 1fr;
   }
 }
