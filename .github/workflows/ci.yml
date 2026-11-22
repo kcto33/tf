@@ -45,6 +45,7 @@ jobs:
       - name: Layout overflow tests (headless Chromium)
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw-browsers
+          PW_FORCE_BUNDLED: "1"
         run: |
           npx playwright install chromium
           npm run test:layout

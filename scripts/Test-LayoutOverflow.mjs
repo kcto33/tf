@@ -47,6 +47,10 @@ async function startServer() {
 }
 
 function launchBrowser() {
+  // PW_FORCE_BUNDLED=1 时跳过系统浏览器（CI 用 Playwright 自带 chromium 最稳定）
+  if (process.env.PW_FORCE_BUNDLED === "1") {
+    return chromium.launch()
+  }
   const executablePath = BROWSER_CANDIDATES.find((candidate) => existsSync(candidate))
   return chromium.launch(executablePath ? { executablePath } : {})
 }
@@ -55,10 +59,17 @@ async function joinRoom(page, displayName, roomCode) {
   // 页面加载后会用 URL 参数自动进入房间（与人工输入同一条路径）。
   const url = `${BASE_URL}/?room=${encodeURIComponent(roomCode)}&name=${encodeURIComponent(displayName)}`
   await page.goto(url, { waitUntil: "domcontentloaded" })
-  await page.waitForFunction(() => {
-    const badge = document.querySelector("#connectionBadge")
-    return badge && badge.textContent.includes("已连接")
-  })
+  try {
+    await page.waitForFunction(() => {
+      const badge = document.querySelector("#connectionBadge")
+      return badge && badge.textContent.includes("已连接")
+    }, null, { timeout: 30000 })
+  } catch (error) {
+    const badge = await page
+      .evaluate(() => document.querySelector("#connectionBadge")?.textContent ?? "badge 不存在")
+      .catch(() => "页面已崩溃")
+    throw new Error(`joinRoom failed for "${displayName}": badge="${badge}" (${error.message})`)
+  }
 }
 
 async function findOverflowingElements(page) {

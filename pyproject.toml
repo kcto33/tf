@@ -25,3 +25,5 @@ ignore = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# CI 里用 `pytest` 直接运行时不会把 CWD 加入 sys.path，显式声明项目根
+pythonpath = ["."]
