@@ -25,6 +25,10 @@ function bootstrap() {
   app.initialize().then(view.render).catch(() => {})
   // 调试/自动化钩子：控制台或 E2E 测试可直接操作应用实例。
   window.__transferApp = app
+  // PWA：注册直通型 Service Worker（不缓存，满足安装条件即可）
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/static/sw.js", { scope: "/" }).catch(() => {})
+  }
 }
 
 if (document.readyState === "loading") {

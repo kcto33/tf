@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import socket
 import subprocess
@@ -8,6 +9,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.request
 import webbrowser
 import winreg
 from contextlib import closing, suppress
@@ -23,6 +25,7 @@ STARTUP_ARGUMENT = "--startup"
 MUTEX_NAME = "Global\\FileTransferTraySingleton"
 LOG_DIR = Path(os.getenv("LOCALAPPDATA", str(Path.home()))) / "FileTransfer"
 LOG_FILE = LOG_DIR / "launcher.log"
+STATUS_POLL_INTERVAL_SECONDS = 3.0
 
 
 @dataclass
@@ -33,6 +36,8 @@ class RuntimeState:
     server_process: subprocess.Popen[str] | None = None
     icon: Any = None
     should_open_browser: bool = False
+    device_count: int = 0
+    poll_stop: threading.Event | None = None
 
 
 STATE = RuntimeState(
@@ -155,6 +160,39 @@ def notify(icon: Any, message: str) -> None:
         icon.notify(message, APP_TITLE)
 
 
+def status_text(item: Any = None) -> str:
+    count = STATE.device_count
+    if count:
+        return f"局域网内 {count} 台设备在线"
+    return "暂无设备在线"
+
+
+def copy_lan_link(icon: Any = None, item: Any = None) -> None:
+    url = STATE.lan_url
+    try:
+        # URL 为纯 ASCII（IP + 端口），clip.exe 可直接处理
+        subprocess.run(
+            "clip",
+            input=url.encode("ascii"),
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        notify(icon, f"已复制：{url}")
+    except Exception:
+        notify(icon, "复制失败，请手动复制")
+
+
+def restart_server(icon: Any = None, item: Any = None) -> None:
+    notify(icon, "正在重启服务…")
+    stop_server_process()
+    try:
+        start_server()
+        notify(icon, f"服务已重启：{STATE.lan_url}")
+    except Exception:
+        log_message(f"Restart failed:\n{traceback.format_exc()}")
+        notify(icon, "重启失败，请查看日志")
+
+
 def show_error_dialog(message: str) -> None:
     with suppress(Exception):
         ctypes.windll.user32.MessageBoxW(None, message, APP_TITLE, 0x10)
@@ -197,12 +235,33 @@ def create_icon_image() -> Any:
     return image
 
 
+def poll_server_status(stop_event: threading.Event) -> None:
+    """每几秒读取一次服务端在线设备数，驱动托盘菜单状态行。"""
+    url = f"http://127.0.0.1:{STATE.port}/api/status"
+    while not stop_event.is_set():
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            STATE.device_count = int(data.get("total_devices") or 0)
+            if STATE.icon:
+                STATE.icon.update_menu()
+        except Exception:
+            # 服务未就绪或正在退出，下一轮重试
+            STATE.device_count = 0
+        stop_event.wait(STATUS_POLL_INTERVAL_SECONDS)
+
+
 def build_menu() -> Any:
     from pystray import Menu, MenuItem
 
     return Menu(
+        MenuItem(status_text, None, enabled=False),
+        Menu.SEPARATOR,
         MenuItem("打开本机页面", open_local_page, default=True),
         MenuItem("打开局域网页面", open_lan_page),
+        MenuItem("复制局域网链接", copy_lan_link),
+        Menu.SEPARATOR,
+        MenuItem("重启服务", restart_server),
         Menu.SEPARATOR,
         MenuItem("开机自启", toggle_startup, checked=lambda item: is_startup_registered()),
         MenuItem("退出", quit_app),
@@ -245,9 +304,18 @@ def start_server() -> None:
             code = STATE.server_process.poll()
         raise RuntimeError(f"File transfer service failed to start. exit_code={code}")
     log_message(f"Server ready at {STATE.local_url} / {STATE.lan_url}")
+    # 启动设备数轮询线程（重启时先停掉旧线程，避免泄漏）
+    if STATE.poll_stop:
+        STATE.poll_stop.set()
+    stop_event = threading.Event()
+    STATE.poll_stop = stop_event
+    threading.Thread(target=poll_server_status, args=(stop_event,), daemon=True).start()
 
 
 def stop_server_process() -> None:
+    if STATE.poll_stop:
+        STATE.poll_stop.set()
+        STATE.poll_stop = None
     if not STATE.server_process:
         return
     pid = STATE.server_process.pid

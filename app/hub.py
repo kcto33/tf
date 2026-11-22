@@ -86,3 +86,10 @@ class RoomHub:
 
     def get_room_size(self, room_code: str) -> int:
         return len(self.rooms.get(room_code, {}))
+
+    def total_devices(self) -> int:
+        return sum(len(room) for room in self.rooms.values())
+
+
+# 模块级单例：路由与信令共享同一个房间登记表。
+hub = RoomHub()

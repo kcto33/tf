@@ -4,6 +4,7 @@ from fastapi import APIRouter
 from fastapi.responses import FileResponse, JSONResponse
 
 from .config import STATIC_DIR, get_lan_candidates
+from .hub import hub
 
 router = APIRouter()
 
@@ -24,6 +25,19 @@ async def health() -> JSONResponse:
 @router.get("/api/lan")
 async def lan_candidates() -> JSONResponse:
     response = JSONResponse({"candidates": get_lan_candidates()})
+    response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+# 供托盘程序轮询：局域网内在线设备数与各房间人数。
+@router.get("/api/status")
+async def status() -> JSONResponse:
+    response = JSONResponse(
+        {
+            "total_devices": hub.total_devices(),
+            "rooms": {room: len(peers) for room, peers in hub.rooms.items()},
+        }
+    )
     response.headers["Cache-Control"] = "no-cache"
     return response
 
