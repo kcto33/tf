@@ -8,7 +8,6 @@ import uvicorn
 
 from app.main import app
 
-
 DEFAULT_PORT = int(os.getenv("WEB_TRANSFER_PORT", "8000"))
 
 

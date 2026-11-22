@@ -1,5 +1,4 @@
 import assert from "node:assert/strict"
-import { readFile } from "node:fs/promises"
 import test from "node:test"
 import { URL as NodeURL } from "node:url"
 
@@ -38,9 +37,8 @@ globalThis.localStorage = {
 globalThis.URL.createObjectURL = () => "blob:test"
 globalThis.URL.revokeObjectURL = () => {}
 
-const source = await readFile(new NodeURL("../static/core.js", import.meta.url), "utf8")
-const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
-const { createTransferApp } = await import(moduleUrl)
+// 直接从磁盘加载模块图（Node ESM 解析相对导入），无需再拼接单文件 data URL。
+const { createTransferApp } = await import(new NodeURL("../static/js/index.js", import.meta.url))
 
 const EXPECTED_STABLE_CHUNK_SIZE = 256 * 1024
 const DEFAULT_ROOM_CODE = "DEFAULT"

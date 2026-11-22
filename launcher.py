@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 APP_NAME = "FileTransfer"
 APP_TITLE = "文件传输"
 DEFAULT_PORT = int(os.getenv("WEB_TRANSFER_PORT", "8000"))

@@ -1,12 +1,17 @@
 import assert from "node:assert/strict"
-import { readFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import test from "node:test"
 import { chromium } from "playwright"
 
+// 端到端布局测试：启动真实服务端，两个浏览器页面进入同一房间，
+// 塞入超长设备名/文件名/聊天文本后断言任意视口都没有横向溢出或元素出界。
 const ROOT = resolve(import.meta.dirname, "..")
-const LONG_TOKEN = "超长设备名".repeat(18) + "LONGUNBROKENIDENTIFIER".repeat(8)
+const PORT = 8123
+const BASE_URL = `http://127.0.0.1:${PORT}`
+const LONG_NAME = "超长设备名".repeat(9) + "LONGUNBROKENIDENTIFIER"
+const LONG_CHAT = "这是一条非常非常长的消息。".repeat(20) + "NOWHITESPACE" + "x".repeat(120)
+
 const BROWSER_CANDIDATES = [
   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
@@ -14,220 +19,53 @@ const BROWSER_CANDIDATES = [
   "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
 ]
 
-async function launchBrowser() {
+async function startServer() {
+  const { spawn } = await import("node:child_process")
+  const python = process.env.PYTHON || "python"
+  const child = spawn(python, ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", String(PORT)], {
+    cwd: ROOT,
+    stdio: ["ignore", "pipe", "pipe"],
+  })
+  let output = ""
+  child.stderr.on("data", (chunk) => {
+    output += String(chunk)
+  })
+  const deadline = Date.now() + 15000
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${BASE_URL}/health`)
+      if (response.ok) {
+        return { child, output: () => output }
+      }
+    } catch {
+      // 服务未就绪，继续等待
+    }
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 250))
+  }
+  child.kill()
+  throw new Error(`uvicorn failed to start: ${output}`)
+}
+
+function launchBrowser() {
   const executablePath = BROWSER_CANDIDATES.find((candidate) => existsSync(candidate))
   return chromium.launch(executablePath ? { executablePath } : {})
 }
 
-async function loadCss(fileName) {
-  return readFile(resolve(ROOT, "static", fileName), "utf8")
-}
-
-function desktopFixture(css) {
-  return `<!doctype html>
-    <html lang="zh-CN">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <style>${css}</style>
-      </head>
-      <body>
-        <main class="page">
-          <section class="panel hero">
-            <div>
-              <p class="eyebrow">${LONG_TOKEN}</p>
-              <h1>文件传输</h1>
-              <p class="lede">${LONG_TOKEN}</p>
-            </div>
-            <div class="connection-grid">
-              <label><span>显示名</span><input type="text" value="${LONG_TOKEN}" /></label>
-              <div class="button-row">
-                <button type="button">${LONG_TOKEN}</button>
-                <button type="button" class="ghost">${LONG_TOKEN}</button>
-              </div>
-              <a class="view-switch" href="#">${LONG_TOKEN}</a>
-            </div>
-          </section>
-          <section class="grid">
-            <article class="panel">
-              <div class="section-head">
-                <h2>${LONG_TOKEN}</h2>
-                <span class="badge muted">${LONG_TOKEN}</span>
-              </div>
-              <dl class="status-list">
-                <div><dt>当前客户端</dt><dd>${LONG_TOKEN}</dd></div>
-                <div><dt>当前目标</dt><dd>${LONG_TOKEN}</dd></div>
-              </dl>
-              <div class="peer-list">
-                <div class="peer-card selected send-selected">
-                  <button class="peer-card-button" type="button">
-                    <div class="peer-card-copy">
-                      <strong class="peer-name">${LONG_TOKEN}</strong>
-                      <p class="peer-meta">${LONG_TOKEN}</p>
-                    </div>
-                    <span class="peer-badge badge muted">${LONG_TOKEN}</span>
-                  </button>
-                  <button class="peer-send-toggle ghost small" type="button">${LONG_TOKEN}</button>
-                </div>
-              </div>
-              <div class="stack">
-                <div class="pending-card">
-                  <div>
-                    <strong class="pending-title">${LONG_TOKEN}</strong>
-                    <p class="pending-meta">${LONG_TOKEN}</p>
-                  </div>
-                  <div class="button-row compact">
-                    <button type="button">${LONG_TOKEN}</button>
-                    <button class="ghost" type="button">${LONG_TOKEN}</button>
-                  </div>
-                </div>
-              </div>
-            </article>
-            <article class="panel">
-              <p class="selected-peer-line">发送对象：<strong>${LONG_TOKEN}</strong></p>
-              <div class="selection-list">
-                <div class="selection-item">
-                  <div class="selection-item-header">
-                    <strong>${LONG_TOKEN}</strong>
-                    <button type="button" class="ghost small selection-remove">${LONG_TOKEN}</button>
-                  </div>
-                  <p class="selection-meta">${LONG_TOKEN}</p>
-                </div>
-              </div>
-              <div class="history-list">
-                <div class="history-item outgoing">
-                  <div class="history-title-row">
-                    <strong class="history-title">${LONG_TOKEN}</strong>
-                    <span class="badge warn">${LONG_TOKEN}</span>
-                  </div>
-                  <p class="history-files">${LONG_TOKEN}</p>
-                  <p class="history-meta">${LONG_TOKEN}</p>
-                </div>
-              </div>
-            </article>
-          </section>
-          <section class="chat-grid">
-            <article class="panel">
-              <div class="chat-list">
-                <div class="chat-item outgoing">
-                  <div class="chat-item-header">
-                    <strong>${LONG_TOKEN}</strong>
-                    <span class="chat-time">${LONG_TOKEN}</span>
-                  </div>
-                  <p>${LONG_TOKEN}</p>
-                </div>
-              </div>
-              <div class="log">
-                <div class="log-item progress">
-                  <strong>${LONG_TOKEN}</strong>
-                  <div class="progress-bar"><span style="width: 80%"></span></div>
-                  <p>${LONG_TOKEN}</p>
-                </div>
-                <div class="log-item">
-                  <div class="section-head">
-                    <strong>${LONG_TOKEN}</strong>
-                    <span class="badge danger">${LONG_TOKEN}</span>
-                  </div>
-                  <p>${LONG_TOKEN}</p>
-                </div>
-              </div>
-            </article>
-          </section>
-        </main>
-      </body>
-    </html>`
-}
-
-function mobileFixture(css) {
-  return `<!doctype html>
-    <html lang="zh-CN">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-        <style>${css}</style>
-      </head>
-      <body>
-        <main class="mobile-page">
-          <section class="mobile-card hero-card">
-            <p class="eyebrow">${LONG_TOKEN}</p>
-            <div class="hero-head">
-              <div><h1>文件传输</h1><p class="lede">${LONG_TOKEN}</p></div>
-              <a class="switch-link" href="#">${LONG_TOKEN}</a>
-            </div>
-            <div class="button-row">
-              <button type="button">${LONG_TOKEN}</button>
-              <button type="button" class="ghost">${LONG_TOKEN}</button>
-            </div>
-            <div class="status-strip">
-              <span class="badge muted">${LONG_TOKEN}</span>
-              <span class="badge muted">${LONG_TOKEN}</span>
-            </div>
-          </section>
-          <section class="mobile-card">
-            <div class="section-head">
-              <h2>${LONG_TOKEN}</h2>
-              <span class="subtle">当前目标：<strong>${LONG_TOKEN}</strong></span>
-            </div>
-            <div class="peer-list">
-              <div class="peer-card selected send-selected">
-                <button class="peer-card-button" type="button">
-                  <div class="peer-card-copy">
-                    <strong class="peer-name">${LONG_TOKEN}</strong>
-                    <p class="peer-meta">${LONG_TOKEN}</p>
-                  </div>
-                  <span class="peer-badge badge muted">${LONG_TOKEN}</span>
-                </button>
-                <button class="peer-send-toggle ghost small" type="button">${LONG_TOKEN}</button>
-              </div>
-            </div>
-            <div class="pending-list">
-              <div class="pending-card">
-                <div>
-                  <strong class="pending-title">${LONG_TOKEN}</strong>
-                  <p class="pending-meta">${LONG_TOKEN}</p>
-                </div>
-                <div class="button-row compact">
-                  <button type="button">${LONG_TOKEN}</button>
-                  <button type="button" class="ghost">${LONG_TOKEN}</button>
-                </div>
-              </div>
-            </div>
-          </section>
-          <section class="mobile-card">
-            <div class="selection-list">
-              <div class="selection-item">
-                <div class="selection-item-header">
-                  <strong>${LONG_TOKEN}</strong>
-                  <button type="button" class="ghost small selection-remove">${LONG_TOKEN}</button>
-                </div>
-                <p>${LONG_TOKEN}</p>
-              </div>
-            </div>
-            <div class="chat-list">
-              <div class="chat-item outgoing">
-                <strong>${LONG_TOKEN}</strong>
-                <p>${LONG_TOKEN}</p>
-                <p>${LONG_TOKEN}</p>
-              </div>
-            </div>
-            <div class="status-list">
-              <div class="status-item">
-                <strong>${LONG_TOKEN}</strong>
-                <p>${LONG_TOKEN}</p>
-              </div>
-            </div>
-          </section>
-        </main>
-      </body>
-    </html>`
+async function joinRoom(page, displayName, roomCode) {
+  // 页面加载后会用 URL 参数自动进入房间（与人工输入同一条路径）。
+  const url = `${BASE_URL}/?room=${encodeURIComponent(roomCode)}&name=${encodeURIComponent(displayName)}`
+  await page.goto(url, { waitUntil: "domcontentloaded" })
+  await page.waitForFunction(() => {
+    const badge = document.querySelector("#connectionBadge")
+    return badge && badge.textContent.includes("已连接")
+  })
 }
 
 async function findOverflowingElements(page) {
   return page.evaluate(() => {
     const viewportWidth = document.documentElement.clientWidth
     const pageOverflow = document.documentElement.scrollWidth - viewportWidth
-    const elements = Array.from(document.body.querySelectorAll("*"))
-    const offenders = elements
+    const offenders = Array.from(document.body.querySelectorAll("*"))
       .filter((element) => {
         if (["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName)) {
           return false
@@ -236,13 +74,23 @@ async function findOverflowingElements(page) {
         if (rect.width < 1 || rect.height < 1) {
           return false
         }
-        return element.scrollWidth > element.clientWidth + 1 || rect.right > viewportWidth + 1
+        // 元素本身逃出视口：直接违规
+        if (rect.right > viewportWidth + 1 || rect.left < -1) {
+          return true
+        }
+        const style = getComputedStyle(element)
+        // ellipsis / 滚动容器是合法的内容截断手段（scrollWidth > clientWidth 是预期行为），
+        // 只有完全没有截断机制还内容超宽才算重叠/挤压。
+        const clamped =
+          ["hidden", "auto", "scroll", "clip"].includes(style.overflowX) ||
+          style.textOverflow === "ellipsis"
+        return !clamped && element.scrollWidth > element.clientWidth + 1
       })
-      .slice(0, 20)
+      .slice(0, 12)
       .map((element) => ({
         tag: element.tagName.toLowerCase(),
-        className: element.className || "",
-        text: (element.textContent || "").trim().slice(0, 80),
+        className: String(element.className || "").slice(0, 60),
+        text: (element.textContent || "").trim().slice(0, 60),
         clientWidth: element.clientWidth,
         scrollWidth: element.scrollWidth,
         right: Math.round(element.getBoundingClientRect().right),
@@ -251,35 +99,67 @@ async function findOverflowingElements(page) {
   })
 }
 
-async function assertNoHorizontalOverflow(browser, name, html, viewport) {
-  const page = await browser.newPage({ viewport })
-  try {
-    await page.setContent(html)
-    const result = await findOverflowingElements(page)
-    assert.equal(result.pageOverflow, 0, `${name} page has horizontal overflow: ${JSON.stringify(result)}`)
-    assert.deepEqual(result.offenders, [], `${name} has overflowing elements: ${JSON.stringify(result)}`)
-  } finally {
-    await page.close()
-  }
+async function assertNoHorizontalOverflow(page, label) {
+  const result = await findOverflowingElements(page)
+  assert.equal(result.pageOverflow, 0, `${label}: page has horizontal overflow ${JSON.stringify(result)}`)
+  assert.deepEqual(result.offenders, [], `${label}: overflowing elements ${JSON.stringify(result)}`)
 }
 
-test("layout keeps long desktop content inside cards", async () => {
+test("layout keeps long content inside cards at every viewport", async () => {
+  const server = await startServer()
   const browser = await launchBrowser()
   try {
-    const css = await loadCss("styles.css")
-    await assertNoHorizontalOverflow(browser, "desktop wide", desktopFixture(css), { width: 1280, height: 900 })
-    await assertNoHorizontalOverflow(browser, "desktop narrow", desktopFixture(css), { width: 390, height: 900 })
-  } finally {
-    await browser.close()
-  }
-})
+    const room = `LAYOUT-${Date.now()}`
+    for (const viewport of [
+      { width: 1280, height: 900 },
+      { width: 768, height: 900 },
+      { width: 390, height: 844 },
+    ]) {
+      const pageA = await browser.newPage({ viewport })
+      const pageB = await browser.newPage({ viewport })
+      try {
+        await joinRoom(pageA, LONG_NAME, room)
+        await joinRoom(pageB, `${LONG_NAME}-2`, room)
 
-test("layout keeps long mobile content inside cards", async () => {
-  const browser = await launchBrowser()
-  try {
-    const css = await loadCss("mobile.css")
-    await assertNoHorizontalOverflow(browser, "mobile", mobileFixture(css), { width: 390, height: 900 })
+        // 双方互见：设备卡渲染超长名字
+        await pageA.waitForSelector(".peer-card")
+        await pageB.waitForSelector(".peer-card")
+
+        // 选择文件 + 超长聊天，让选择列表/聊天气泡都进入最坏情况
+        await pageA.evaluate((text) => {
+          const input = document.querySelector("#chatInput")
+          input.value = text
+          input.dispatchEvent(new Event("input", { bubbles: true }))
+        }, LONG_CHAT)
+        await pageA.click("#chatSendBtn")
+        await pageB.waitForSelector(".chat-item")
+
+        // 注入一个超长的待确认传输卡与选中文件（不真正传输，只测布局）
+        await pageB.evaluate((name) => {
+          const selection = document.querySelector("#selectionList")
+          selection.className = "list selection-list"
+          selection.innerHTML = `
+            <div class="selection-item">
+              <span class="item-icon">F</span>
+              <div class="selection-copy">
+                <strong class="ellipsis">${name}</strong>
+                <span class="selection-meta">1.2 MB</span>
+              </div>
+              <button type="button" class="icon-btn">×
+              </button>
+            </div>`
+        }, `${LONG_NAME}.pdf`)
+
+        await pageA.waitForTimeout(300)
+        await assertNoHorizontalOverflow(pageA, `page A @${viewport.width}`)
+        await assertNoHorizontalOverflow(pageB, `page B @${viewport.width}`)
+      } finally {
+        await pageA.close()
+        await pageB.close()
+      }
+    }
   } finally {
     await browser.close()
+    server.child.kill()
   }
 })

@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 artifacts/
 node_modules/
+build/
+dist/
+output/
+tmp/
+.e2e-artifacts/

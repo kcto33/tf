@@ -50,3 +50,40 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// 安装后自动放行防火墙：管理员安装时立即生效；
+// 非管理员安装时 netsh 会静默失败，由 Windows 首次监听时的"允许访问"弹窗兜底。
+procedure AddFirewallRules();
+var
+  ResultCode: Integer;
+  ServerPath: string;
+begin
+  ServerPath := ExpandConstant('{app}\{#MyServerExeName}');
+  Exec('netsh.exe', 'advfirewall firewall delete rule name="FileTransfer-Server-TCP"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('netsh.exe', 'advfirewall firewall delete rule name="FileTransfer-Server-Program"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // 端口规则：覆盖默认端口 8000 的信令通道
+  Exec('netsh.exe', 'advfirewall firewall add rule name="FileTransfer-Server-TCP" dir=in action=allow protocol=TCP localport=8000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // 程序规则：覆盖自定义端口（WEB_TRANSFER_PORT）下的任意监听
+  Exec('netsh.exe', 'advfirewall firewall add rule name="FileTransfer-Server-Program" dir=in action=allow program="' + ServerPath + '" profile=any', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    AddFirewallRules();
+end;
+
+procedure RemoveFirewallRules();
+var
+  ResultCode: Integer;
+begin
+  Exec('netsh.exe', 'advfirewall firewall delete rule name="FileTransfer-Server-TCP"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('netsh.exe', 'advfirewall firewall delete rule name="FileTransfer-Server-Program"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RemoveFirewallRules();
+end;

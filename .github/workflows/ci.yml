@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  backend:
+    name: Python lint & tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Ruff lint
+        run: ruff check app tests launcher.py server_entry.py
+      - name: Pytest
+        run: pytest tests/ -q
+
+  frontend:
+    name: Node tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies (layout test needs uvicorn)
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi==0.116.1 "uvicorn[standard]==0.35.0"
+      - name: Install Node dependencies
+        run: npm ci
+      - name: Transfer cancellation tests
+        run: npm run test:core
+      - name: Layout overflow tests (headless Chromium)
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw-browsers
+        run: |
+          npx playwright install chromium
+          npm run test:layout
