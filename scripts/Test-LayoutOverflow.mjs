@@ -116,6 +116,24 @@ async function assertNoHorizontalOverflow(page, label) {
   assert.deepEqual(result.offenders, [], `${label}: overflowing elements ${JSON.stringify(result)}`)
 }
 
+const DIAGNOSTICS = []
+
+function attachDiagnostics(page, label) {
+  page.on("console", (msg) => DIAGNOSTICS.push(`[${label} console] ${msg.text().slice(0, 200)}`))
+  page.on("pageerror", (err) => DIAGNOSTICS.push(`[${label} pageerror] ${String(err).slice(0, 400)}`))
+  page.on("requestfailed", (req) =>
+    DIAGNOSTICS.push(`[${label} reqfail] ${req.url().slice(0, 140)} :: ${req.failure()?.errorText ?? "unknown"}`)
+  )
+}
+
+function dumpDiagnostics(server) {
+  console.error(`--- server output ---\n${server.output().slice(-2500)}`)
+  console.error(`--- page diagnostics (${DIAGNOSTICS.length}) ---`)
+  for (const line of DIAGNOSTICS.slice(-60)) {
+    console.error(line)
+  }
+}
+
 test("layout keeps long content inside cards at every viewport", async () => {
   const server = await startServer()
   const browser = await launchBrowser()
@@ -129,6 +147,8 @@ test("layout keeps long content inside cards at every viewport", async () => {
       const pageA = await browser.newPage({ viewport })
       const pageB = await browser.newPage({ viewport })
       try {
+        attachDiagnostics(pageA, `A@${viewport.width}`)
+        attachDiagnostics(pageB, `B@${viewport.width}`)
         await joinRoom(pageA, LONG_NAME, room)
         await joinRoom(pageB, `${LONG_NAME}-2`, room)
 
@@ -169,6 +189,9 @@ test("layout keeps long content inside cards at every viewport", async () => {
         await pageB.close()
       }
     }
+  } catch (error) {
+    dumpDiagnostics(server)
+    throw error
   } finally {
     await browser.close()
     server.child.kill()
